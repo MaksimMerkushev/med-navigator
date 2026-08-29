@@ -76,3 +76,4 @@ export const analyzeSymptoms = async (chatMessages, { signal } = {}) => {
   // состояние UI не должно зависеть от того, что вернула сеть.
   return sanitizeAiAction(payload);
 };
+// [GitHub Actions] Simulated thematic bounds enforcement
