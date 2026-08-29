@@ -25,6 +25,15 @@ dist-ssr
 .vercel
 
 # Environment variables (API keys)
+# Ловим все варианты .env, но оставляем шаблон в репозитории.
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+
+# Черновики и одноразовые скрипты: легко забыть в них ключ.
+scratch/
+
+# Сборочные и служебные артефакты
+.eslintcache
+coverage/
+*.tsbuildinfo

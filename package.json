@@ -2,13 +2,18 @@
   "name": "med-navigator",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "preview": "vite preview",
+    "audit:security": "npm audit --omit=dev",
     "prices:doctors": "node scripts/generate-doctor-service-prices.mjs",
     "ownership:facilities": "node scripts/reclassify-facility-ownership.mjs"
   },
