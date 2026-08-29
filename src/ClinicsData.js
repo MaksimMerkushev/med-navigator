@@ -25,29 +25,7 @@ export const ClinicsData = {
       website: 'https://www.icdc.ru/',
       booking_url: 'https://uslugi.tatarstan.ru/med',
       doctor_list_completeness: 'partial',
-      doctors: [
-        {
-          doctor_id: 'smirnova-anna-sergeevna-icdc',
-          full_name: 'Смирнова Анна Сергеевна',
-          specialty: 'Кардиолог',
-          experience_years: 15,
-          category: 'Высшая категория',
-          degree: 'Кандидат медицинских наук',
-          schedule: {
-            mon: '10:00-18:00',
-            tue: '10:00-18:00',
-            wed: '10:00-18:00',
-            thu: '10:00-18:00',
-            fri: '10:00-18:00',
-            sat: 'Выходной',
-            sun: 'Выходной',
-            raw: 'Пн-Пт с 10:00 до 18:00',
-          },
-          profile_url: 'https://www.icdc.ru/specialists/cardiology/smirnova',
-          sources: ['https://www.icdc.ru/specialists', 'https://prodoctorov.ru/kazan/lpu/12345-mkdc/'],
-          last_verified_at: '2026-04-05T11:43:09Z',
-        },
-      ],
+      doctors: [],
       sources: [
         {
           url: 'https://www.icdc.ru/contacts',
@@ -85,29 +63,7 @@ export const ClinicsData = {
       website: 'https://korl.ru/',
       booking_url: 'https://korl.ru/make-an-appointment/',
       doctor_list_completeness: 'partial',
-      doctors: [
-        {
-          doctor_id: 'pokrovskaya-elena-mikhailovna-korl',
-          full_name: 'Покровская Елена Михайловна',
-          specialty: 'Оториноларинголог (ЛОР)',
-          experience_years: 22,
-          category: 'Высшая категория',
-          degree: 'Доктор медицинских наук',
-          schedule: {
-            mon: '09:00-15:00',
-            tue: '09:00-15:00',
-            wed: '09:00-15:00',
-            thu: '09:00-15:00',
-            fri: '09:00-15:00',
-            sat: null,
-            sun: 'Выходной',
-            raw: 'Уточнять по телефону регистратуры',
-          },
-          profile_url: 'https://korl.ru/doctors/pokrovskaya-elena-mikhaylovna/',
-          sources: ['https://korl.ru/doctors/'],
-          last_verified_at: '2026-04-05T11:43:09Z',
-        },
-      ],
+      doctors: [],
       sources: [
         {
           url: 'https://korl.ru/kontakty/',
@@ -140,29 +96,7 @@ export const ClinicsData = {
       website: 'https://rkb-tatarstan.ru/',
       booking_url: 'https://uslugi.tatarstan.ru/med',
       doctor_list_completeness: 'partial',
-      doctors: [
-        {
-          doctor_id: 'khabibullin-rustem-maratovich-rkb',
-          full_name: 'Хабибуллин Рустем Маратович',
-          specialty: 'Хирург',
-          experience_years: 12,
-          category: 'Первая категория',
-          degree: null,
-          schedule: {
-            mon: '09:00-16:00',
-            tue: '09:00-16:00',
-            wed: '09:00-16:00',
-            thu: '09:00-16:00',
-            fri: '09:00-16:00',
-            sat: 'Выходной',
-            sun: 'Выходной',
-            raw: 'Пн-Пт 09:00 - 16:00',
-          },
-          profile_url: null,
-          sources: ['https://rkb-tatarstan.ru/doctors/'],
-          last_verified_at: '2026-04-05T11:43:09Z',
-        },
-      ],
+      doctors: [],
       sources: [
         {
           url: 'https://rkb-tatarstan.ru/contacts/',
