@@ -2,7 +2,7 @@
  * © 2026 MedКарта Казань. Все права защищены.
  * Этот код является интеллектуальной собственностью автора.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
@@ -14,7 +14,6 @@ import {
   Bike,
   Building2,
   Car,
-  CheckCircle,
   ChevronDown,
   ChevronUp,
   ChevronLeft,
@@ -42,17 +41,41 @@ import {
   XCircle,
   Bot,
   GripVertical,
+  Phone,
+  Globe,
+  Share2,
+  ExternalLink,
+  Wallet,
+  HelpCircle,
 } from 'lucide-react';
 import { doctorsData } from './doctors';
+import { verifiedDoctors } from './verifiedDoctors';
 import { kazanFacilities } from './kazanFacilities';
 import { ClinicsData } from './ClinicsData';
-import AIAssistant from './AIAssistant';
-import { getApiKey } from './services/ai';
+import Toast, { useToast } from './Toast';
+import { SORT_MODES } from '../api/_shared/sanitize.js';
+import { useDebouncedValue } from './hooks/useDebouncedValue';
+import { isBoolean, isStringIdArray, useLocalStorageState } from './hooks/useLocalStorageState';
 
+// Помощник и его зависимости грузятся отдельным чанком: большинство сессий
+// открывается ради карты, а не чата, — нет смысла тянуть его в первый байт.
+const AIAssistant = lazy(() => import('./AIAssistant'));
 
 delete L.Icon.Default.prototype._getIconUrl;
 
-const createBeautifulArrow = (color, isUser = false, label = null) => {
+// L.divIcon вставляет строку через innerHTML. Даже если сейчас сюда приходят
+// только константы, значения приводим к безопасному виду — чтобы будущая
+// правка не превратила это в точку внедрения разметки.
+const SAFE_COLOR = /^#[0-9a-f]{3,8}$/i;
+const sanitizeColor = (value) => (SAFE_COLOR.test(String(value)) ? String(value) : '#3b82f6');
+const sanitizeLabel = (value) => {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits ? digits.slice(0, 2) : null;
+};
+
+const createBeautifulArrow = (rawColor, isUser = false, rawLabel = null) => {
+  const color = sanitizeColor(rawColor);
+  const label = sanitizeLabel(rawLabel);
   const size = isUser ? [26, 26] : [34, 46];
   const anchor = isUser ? [13, 13] : [17, 46];
   const popupAnchor = isUser ? [0, -13] : [0, -42];
@@ -81,7 +104,19 @@ const createBeautifulArrow = (color, isUser = false, label = null) => {
   });
 };
 const dayKeys = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-const storageKey = 'med-navigator-favorites';
+const FAVORITES_STORAGE_KEY = 'med-navigator-favorites';
+const DARK_MODE_STORAGE_KEY = 'med-navigator-dark-mode';
+const MAX_ROUTE_STOPS = 5;
+const PAGE_SIZE = 30;
+const EMPTY_SERVICES = [];
+const sortRu = (left, right) => String(left).localeCompare(String(right), 'ru');
+const uniqueSorted = (values) => [...new Set(values.filter(Boolean))].sort(sortRu);
+
+const TRAVEL_MODE_OPTIONS = [
+  { id: 'driving', icon: Car, label: 'На автомобиле' },
+  { id: 'foot', icon: Footprints, label: 'Пешком' },
+  { id: 'bike', icon: Bike, label: 'На велосипеде' },
+];
 
 const blueArrowIcon = createBeautifulArrow('#3b82f6');
 
@@ -258,11 +293,12 @@ const RoutingMachine = ({ originLocation, routeTargets, travelMode, setRouteData
   });
 
   useEffect(() => {
+    // Ветка «маршрута нет»: раньше здесь обращались к map даже когда map === null.
     if (!map || !originLocation || !routeTargets || routeTargets.length === 0) {
-      if (routingControlRef.current) {
+      if (map && routingControlRef.current) {
         map.removeControl(routingControlRef.current);
-        routingControlRef.current = null;
       }
+      routingControlRef.current = null;
       return;
     }
 
@@ -277,11 +313,15 @@ const RoutingMachine = ({ originLocation, routeTargets, travelMode, setRouteData
       foot: 'https://routing.openstreetmap.de/routed-foot/route/v1',
       bike: 'https://routing.openstreetmap.de/routed-bike/route/v1',
     };
+    // Раньше профиль всегда был 'driving' независимо от выбранного транспорта:
+    // сервер пешего/велосипедного маршрута получал запрос с чужим профилем.
+    const profiles = { driving: 'driving', foot: 'foot', bike: 'bike' };
+    const mode = serviceUrls[travelMode] ? travelMode : 'driving';
 
     try {
       const router = L.Routing.osrmv1({
-        serviceUrl: serviceUrls[travelMode],
-        profile: 'driving',
+        serviceUrl: serviceUrls[mode],
+        profile: profiles[mode],
       });
 
       const waypoints = [
@@ -292,7 +332,7 @@ const RoutingMachine = ({ originLocation, routeTargets, travelMode, setRouteData
       routingControlRef.current = L.Routing.control({
         waypoints,
         router,
-        lineOptions: { styles: [{ color: lineColors[travelMode], weight: 6, opacity: 0.9 }] },
+        lineOptions: { styles: [{ color: lineColors[mode], weight: 6, opacity: 0.9 }] },
         show: false,
         addWaypoints: false,
         routeWhileDragging: false,
@@ -381,19 +421,33 @@ const scheduleTextToRange = (value) => {
   return { start, end };
 };
 
-const isScheduleOpenNow = (schedule, now) => {
-  if (!schedule) {
-    return false;
+// Расписание бывает трёх видов, и раньше два последних не различались.
+// 487 объектов из OpenStreetMap приходят с schedule: null — графика попросту
+// нет в данных. Старая логика возвращала для них false, и карточка показывала
+// красное «Закрыто», противореча собственной строке «График уточняется».
+// OPEN_STATE.UNKNOWN отделяет «точно закрыто» от «мы не знаем».
+const OPEN_STATE = { OPEN: 'open', CLOSED: 'closed', UNKNOWN: 'unknown' };
+
+const hasAnyScheduleData = (schedule) =>
+  Boolean(schedule) && dayKeys.some((dayKey) => {
+    const value = schedule[dayKey];
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+
+const resolveOpenState = (schedule, now) => {
+  if (!hasAnyScheduleData(schedule)) {
+    return OPEN_STATE.UNKNOWN;
   }
 
-  const key = dayKeys[now.getDay()];
-  const range = scheduleTextToRange(schedule[key]);
+  const range = scheduleTextToRange(schedule[dayKeys[now.getDay()]]);
   if (!range) {
-    return false;
+    return OPEN_STATE.CLOSED;
   }
 
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  return currentMinutes >= range.start && currentMinutes < range.end;
+  return currentMinutes >= range.start && currentMinutes < range.end
+    ? OPEN_STATE.OPEN
+    : OPEN_STATE.CLOSED;
 };
 
 const isWeekendReception = (schedule) => {
@@ -422,6 +476,204 @@ const getTodaySchedule = (schedule, now) => {
 
   return schedule[dayKeys[now.getDay()]] || 'График уточняется';
 };
+
+const WEEK_DAY_LABELS = {
+  mon: 'Понедельник',
+  tue: 'Вторник',
+  wed: 'Среда',
+  thu: 'Четверг',
+  fri: 'Пятница',
+  sat: 'Суббота',
+  sun: 'Воскресенье',
+};
+const WEEK_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+const buildWeekSchedule = (schedule, now) => {
+  if (!hasAnyScheduleData(schedule)) {
+    return null;
+  }
+
+  const todayKey = dayKeys[now.getDay()];
+  return WEEK_ORDER.map((dayKey) => ({
+    key: dayKey,
+    label: WEEK_DAY_LABELS[dayKey],
+    value: schedule[dayKey] || 'Не указано',
+    isToday: dayKey === todayKey,
+    isDayOff: /выход/i.test(String(schedule[dayKey] || '')),
+  }));
+};
+
+// --- Контакты -------------------------------------------------------------
+
+// tel: не переносит пробелы и скобки — в ссылку идёт только «+» и цифры,
+// а на экране остаётся человекочитаемый вид из данных.
+const toTelHref = (phone) => {
+  const cleaned = String(phone || '').replace(/[^\d+]/g, '');
+  return cleaned.length >= 6 ? `tel:${cleaned}` : null;
+};
+
+// Ссылка из данных считается недоверенной: разрешаем только http(s),
+// чтобы исключить javascript: и data: в href.
+const toSafeUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  try {
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+};
+
+const formatPriceRange = (entry) => {
+  if (!entry) return null;
+  const min = Number(entry.minRub);
+  const max = Number(entry.maxRub);
+  if (!Number.isFinite(min) && !Number.isFinite(max)) return null;
+
+  const format = (value) => new Intl.NumberFormat('ru-RU').format(Math.round(value));
+  if (Number.isFinite(min) && Number.isFinite(max) && min !== max) {
+    return `${format(min)}–${format(max)} ₽`;
+  }
+  return `${format(Number.isFinite(min) ? min : max)} ₽`;
+};
+
+// --- Внешние карты --------------------------------------------------------
+
+const YANDEX_ROUTE_TYPE = { driving: 'auto', foot: 'pd', bike: 'bc' };
+
+/**
+ * Ссылка на Яндекс.Карты для одной или нескольких точек — на всех платформах.
+ * Промежуточные точки Яндекс принимает через «~», поэтому весь маршрут
+ * передаётся целиком. На телефоне ссылка открывается в приложении Яндекс.Карт,
+ * если оно установлено, иначе в браузере.
+ */
+const buildExternalMapUrl = (origin, targets, travelMode) => {
+  const points = (targets || []).filter((t) => Number.isFinite(t?.lat) && Number.isFinite(t?.lng));
+  if (points.length === 0) {
+    return null;
+  }
+
+  const coords = (point) => `${point.lat.toFixed(6)},${point.lng.toFixed(6)}`;
+
+  const segments = [];
+  if (origin) {
+    segments.push(`${origin[0].toFixed(6)},${origin[1].toFixed(6)}`);
+  }
+  points.forEach((point) => segments.push(coords(point)));
+
+  const params = new URLSearchParams({
+    rtext: segments.join('~'),
+    rtt: YANDEX_ROUTE_TYPE[travelMode] || 'auto',
+  });
+  return `https://yandex.ru/maps/?${params.toString()}`;
+};
+
+const externalMapLabel = () => 'Открыть в Яндекс.Картах';
+
+// --- Состояние в адресной строке -----------------------------------------
+
+/*
+ * Фильтры живут в URL, чтобы ссылку можно было переслать или сохранить.
+ * Параметры из адресной строки — недоверенный ввод: значения из перечислений
+ * сверяются со списком, числа зажимаются в диапазон, строки обрезаются.
+ * Дальше их всё равно фильтрует справочник, но проверять надо на входе.
+ */
+const URL_KEYS = {
+  q: 'q',
+  clinic: 'clinic',
+  district: 'district',
+  facilityType: 'type',
+  doctorProfile: 'profile',
+  ownership: 'owner',
+  cardDisplayMode: 'show',
+  sortBy: 'sort',
+  services: 'services',
+  minRating: 'rating',
+  minExperience: 'exp',
+  maxDistance: 'dist',
+  flags: 'flags',
+  focus: 'doc',
+};
+
+const FLAG_KEYS = ['open', 'fav', 'weekend', 'evening', 'online', 'wheelchair', 'children'];
+
+const readUrlState = () => {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const text = (key, maxLength = 80) => {
+    const value = params.get(URL_KEYS[key]);
+    return value ? value.slice(0, maxLength) : null;
+  };
+  const number = (key, min, max) => {
+    const value = Number(params.get(URL_KEYS[key]));
+    return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : null;
+  };
+  const oneOf = (key, allowed) => {
+    const value = params.get(URL_KEYS[key]);
+    return value && allowed.includes(value) ? value : null;
+  };
+
+  const flags = new Set((params.get(URL_KEYS.flags) || '').split(',').filter((f) => FLAG_KEYS.includes(f)));
+
+  return {
+    q: text('q', 100),
+    clinic: text('clinic'),
+    district: text('district'),
+    facilityType: text('facilityType'),
+    doctorProfile: text('doctorProfile'),
+    ownership: oneOf('ownership', ['Государственная', 'Частная']),
+    cardDisplayMode: oneOf('cardDisplayMode', ['all', 'doctor', 'facility']),
+    sortBy: oneOf('sortBy', SORT_MODES),
+    services: (params.get(URL_KEYS.services) || '')
+      .split('|')
+      .map((s) => s.trim().slice(0, 80))
+      .filter(Boolean)
+      .slice(0, 6),
+    minRating: number('minRating', 0, 5),
+    minExperience: number('minExperience', 0, 40),
+    maxDistance: number('maxDistance', 0, 50),
+    focus: text('focus', 120),
+    flags,
+  };
+};
+
+const buildUrlQuery = (state) => {
+  const params = new URLSearchParams();
+  const put = (key, value, skip) => {
+    if (value !== null && value !== undefined && value !== '' && value !== skip) {
+      params.set(URL_KEYS[key], String(value));
+    }
+  };
+
+  put('q', state.q);
+  put('clinic', state.clinic, 'all');
+  put('district', state.district, 'all');
+  put('facilityType', state.facilityType, 'all');
+  put('doctorProfile', state.doctorProfile, 'all');
+  put('ownership', state.ownership, 'all');
+  put('cardDisplayMode', state.cardDisplayMode, 'all');
+  put('sortBy', state.sortBy, 'recommendation');
+  put('minRating', state.minRating || null, 0);
+  put('minExperience', state.minExperience || null, 0);
+  put('maxDistance', state.maxDistance || null, 0);
+  put('focus', state.focus);
+
+  if (state.services?.length) {
+    params.set(URL_KEYS.services, state.services.join('|'));
+  }
+  if (state.flags?.length) {
+    params.set(URL_KEYS.flags, state.flags.join(','));
+  }
+
+  return params.toString();
+};
+
+const INITIAL_URL_STATE = readUrlState();
 
 const calculateDistanceKm = (origin, target) => {
   if (!origin || !target) {
@@ -496,7 +748,7 @@ const ToggleChip = ({ active, onClick, children, title }) => (
 export default function App() {
   const [userLocation, setUserLocation] = useState(defaultLocation);
   const [routeTargets, setRouteTargets] = useState([]);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(INITIAL_URL_STATE.q || '');
   const [locationError, setLocationError] = useState(!hasGeolocationSupport);
   const [isFollowingUser, setIsFollowingUser] = useState(true);
   const [flyToTarget, setFlyToTarget] = useState(null);
@@ -507,32 +759,27 @@ export default function App() {
   const [travelMode, setTravelMode] = useState('driving');
   const [routeData, setRouteData] = useState(null);
   const [isRouteStarted, setIsRouteStarted] = useState(false);
-  const [sortBy, setSortBy] = useState('recommendation');
-  const [selectedFacilityType, setSelectedFacilityType] = useState('all');
-  const [selectedClinic, setSelectedClinic] = useState('all');
-  const [selectedDistrict, setSelectedDistrict] = useState('all');
-  const [selectedDoctorProfile, setSelectedDoctorProfile] = useState('all');
-  const [selectedOwnership, setSelectedOwnership] = useState('all');
-  const [cardDisplayMode, setCardDisplayMode] = useState('all');
-  const [selectedServices, setSelectedServices] = useState([]);
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [openOnly, setOpenOnly] = useState(false);
-  const [weekendOnly, setWeekendOnly] = useState(false);
-  const [eveningOnly, setEveningOnly] = useState(false);
-  const [onlineOnly, setOnlineOnly] = useState(false);
-  const [wheelchairOnly, setWheelchairOnly] = useState(false);
-  const [childrenOnly, setChildrenOnly] = useState(false);
-  const [minRating, setMinRating] = useState(0);
-  const [minExperience, setMinExperience] = useState(0);
-  const [maxDistance, setMaxDistance] = useState(0);
-  const [favorites, setFavorites] = useState(() => {
-    try {
-      const raw = localStorage.getItem(storageKey);
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [sortBy, setSortBy] = useState(INITIAL_URL_STATE.sortBy || 'recommendation');
+  const [selectedFacilityType, setSelectedFacilityType] = useState(INITIAL_URL_STATE.facilityType || 'all');
+  const [selectedClinic, setSelectedClinic] = useState(INITIAL_URL_STATE.clinic || 'all');
+  const [selectedDistrict, setSelectedDistrict] = useState(INITIAL_URL_STATE.district || 'all');
+  const [selectedDoctorProfile, setSelectedDoctorProfile] = useState(INITIAL_URL_STATE.doctorProfile || 'all');
+  const [selectedOwnership, setSelectedOwnership] = useState(INITIAL_URL_STATE.ownership || 'all');
+  const [cardDisplayMode, setCardDisplayMode] = useState(INITIAL_URL_STATE.cardDisplayMode || 'all');
+  const [selectedServices, setSelectedServices] = useState(INITIAL_URL_STATE.services || []);
+  const [favoritesOnly, setFavoritesOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('fav')));
+  const [openOnly, setOpenOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('open')));
+  const [weekendOnly, setWeekendOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('weekend')));
+  const [eveningOnly, setEveningOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('evening')));
+  const [onlineOnly, setOnlineOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('online')));
+  const [wheelchairOnly, setWheelchairOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('wheelchair')));
+  const [childrenOnly, setChildrenOnly] = useState(() => Boolean(INITIAL_URL_STATE.flags?.has('children')));
+  const [minRating, setMinRating] = useState(INITIAL_URL_STATE.minRating ?? 0);
+  const [minExperience, setMinExperience] = useState(INITIAL_URL_STATE.minExperience ?? 0);
+  const [maxDistance, setMaxDistance] = useState(INITIAL_URL_STATE.maxDistance ?? 0);
+  // Избранное и тема читаются из localStorage через валидатор: испорченное или
+  // подменённое значение раньше роняло приложение на favorites.includes(...).
+  const [favorites, setFavorites] = useLocalStorageState(FAVORITES_STORAGE_KEY, [], isStringIdArray);
   const [now, setNow] = useState(() => new Date());
   const [isLocationReady, setIsLocationReady] = useState(!hasGeolocationSupport);
   const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(true);
@@ -542,18 +789,21 @@ export default function App() {
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [activeFilterTab, setActiveFilterTab] = useState('facility');
   const [mobileSheetDragOffset, setMobileSheetDragOffset] = useState(0);
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem('med-navigator-dark-mode') || 'false');
-    } catch {
-      return false;
-    }
-  });
+  const [isDarkMode, setIsDarkMode] = useLocalStorageState(DARK_MODE_STORAGE_KEY, false, isBoolean);
+  const { toast, showToast, dismiss: dismissToast } = useToast();
 
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isRoutePanelCollapsed, setIsRoutePanelCollapsed] = useState(false);
   const [buildRouteTrigger, setBuildRouteTrigger] = useState(false);
   const [targetStopsTrigger, setTargetStopsTrigger] = useState(null); // Apply processing results to UI state
+
+  // Справочники в ref: handleApplyTriage не должен пересоздаваться на каждый
+  // пересчёт списков, иначе AIAssistant перерисовывается впустую.
+  const districtSetRef = useRef(new Set());
+  const clinicSetRef = useRef(new Set());
+  const facilityTypeSetRef = useRef(new Set());
+  const doctorProfileSetRef = useRef(new Set());
+  const serviceSetRef = useRef(new Set());
 
   const handleApplyTriage = useCallback((result) => {
     // === МАРШРУТ ===
@@ -599,7 +849,11 @@ export default function App() {
     if (result.ownership && ['Государственная', 'Частная'].includes(result.ownership)) {
       setSelectedOwnership(result.ownership);
     }
-    if (result.district) setSelectedDistrict(result.district);
+    // Значения справочников принимаются только если реально есть в данных:
+    // модель может выдумать несуществующий район и «обнулить» выдачу.
+    if (result.district && districtSetRef.current.has(result.district)) {
+      setSelectedDistrict(result.district);
+    }
     if (result.cardDisplayMode && ['all', 'doctor', 'facility'].includes(result.cardDisplayMode)) {
       setCardDisplayMode(result.cardDisplayMode);
     }
@@ -627,27 +881,26 @@ export default function App() {
       setMaxDistance(Math.max(0, Math.min(50, result.maxDistance)));
     }
 
-    if (typeof result.clinic === 'string' && result.clinic.trim()) {
-      setSelectedClinic(result.clinic.trim());
+    if (result.clinic && clinicSetRef.current.has(result.clinic)) {
+      setSelectedClinic(result.clinic);
     }
-    if (typeof result.facilityType === 'string' && result.facilityType.trim()) {
-      setSelectedFacilityType(result.facilityType.trim());
+    if (result.facilityType && facilityTypeSetRef.current.has(result.facilityType)) {
+      setSelectedFacilityType(result.facilityType);
     }
-    if (typeof result.doctorProfile === 'string' && result.doctorProfile.trim()) {
-      setSelectedDoctorProfile(result.doctorProfile.trim());
+    if (result.doctorProfile && doctorProfileSetRef.current.has(result.doctorProfile)) {
+      setSelectedDoctorProfile(result.doctorProfile);
     }
-    if (Array.isArray(result.services)) {
-      const normalizedServices = result.services
-        .filter((service) => typeof service === 'string')
-        .map((service) => service.trim())
-        .filter(Boolean)
-        .slice(0, 6);
-      setSelectedServices(normalizedServices);
+    if (Array.isArray(result.services) && result.services.length > 0) {
+      const knownServices = result.services.filter((service) => serviceSetRef.current.has(service));
+      if (knownServices.length > 0) {
+        setSelectedServices(knownServices);
+      }
     }
 
     // === СОРТИРОВКА ===
-    if (result.sortMode === 'distance') setSortBy('distance');
-    else if (result.sortMode === 'rating') setSortBy('rating');
+    if (SORT_MODES.includes(result.sortMode)) {
+      setSortBy(result.sortMode);
+    }
 
     // Если только clearRoute/clearFilters без дополнительных действий — выходим
     if ((result.clearRoute || result.clearFilters) && !result.specialty && !result.service && !result.searchQuery && !result.buildRoute && !result.targetStops?.length) {
@@ -702,7 +955,7 @@ export default function App() {
       setRouteTargets((prev) => {
         const bestMatch = sortedCandidates.find((doc) => !prev.some((target) => target.id === doc.id));
 
-        if (!bestMatch || prev.length >= 5) {
+        if (!bestMatch || prev.length >= MAX_ROUTE_STOPS) {
           return prev;
         }
 
@@ -711,9 +964,9 @@ export default function App() {
         return [...prev, bestMatch];
       });
     }
-  }, []);
-
-
+    // Сеттеры useState стабильны; перечислены явно, чтобы правило
+    // exhaustive-deps не считало их пропущенными зависимостями.
+  }, [setIsDarkMode]);
 
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   const [isTablet, setIsTablet] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 768 && window.innerWidth <= 1024);
@@ -734,8 +987,9 @@ export default function App() {
   const enrichedDoctorsRef = useRef([]);
   const clinicsFacilities = useMemo(() => mapClinicsToFacilities(ClinicsData), []);
   const sourceFacilities = useMemo(() => {
-    // Объединяем оба источника: ручной список и сгенерированный
-    const base = [...doctorsData, ...kazanFacilities, ...clinicsFacilities];
+    // Источники: проверенные врачи с официальных сайтов больниц,
+    // учреждения из OpenStreetMap и данные по клиникам.
+    const base = [...verifiedDoctors, ...doctorsData, ...kazanFacilities, ...clinicsFacilities];
     const clinicAddressMap = new Map();
     const clinicCoordsMap = new Map();
 
@@ -792,19 +1046,13 @@ export default function App() {
   }, [clinicsFacilities]);
 
   const activeOrigin = isManualOrigin && customOrigin ? customOrigin : userLocation;
+  // Поле ввода обновляется мгновенно, тяжёлая фильтрация — с задержкой.
+  const deferredSearchQuery = useDebouncedValue(searchQuery, 180);
 
   useEffect(() => {
     const timerId = setInterval(() => setNow(new Date()), 300000);
     return () => clearInterval(timerId);
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(favorites));
-    } catch (error) {
-      console.error(error);
-    }
-  }, [favorites]);
 
   useEffect(() => {
     pendingSidebarWidthRef.current = sidebarWidth;
@@ -876,7 +1124,16 @@ export default function App() {
     watchId = navigator.geolocation.watchPosition(
       (position) => {
         window.clearTimeout(fallbackTimer);
-        setUserLocation([position.coords.latitude, position.coords.longitude]);
+        const next = [position.coords.latitude, position.coords.longitude];
+        setUserLocation((prev) => {
+          // watchPosition срабатывает несколько раз в секунду, а каждая новая
+          // ссылка пересчитывала расстояния до всех ~1000 объектов.
+          // Игнорируем дрожание меньше ~5 метров.
+          if (prev && Math.abs(prev[0] - next[0]) < 0.00005 && Math.abs(prev[1] - next[1]) < 0.00005) {
+            return prev;
+          }
+          return next;
+        });
         setIsLocationReady(true);
       },
       () => {
@@ -922,11 +1179,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('med-navigator-dark-mode', JSON.stringify(isDarkMode));
-    } catch (error) {
-      console.error(error);
-    }
     const root = document.documentElement;
     root.classList.add('theme-switching');
     if (isDarkMode) {
@@ -945,116 +1197,165 @@ export default function App() {
     };
   }, [isDarkMode]);
 
-  const enrichedDoctors = useMemo(
+  // Тяжёлая часть: расстояния, расписание, бейджи. Пересчитывается только при
+  // смене точки отсчёта, времени или набора данных.
+  const baseEnrichedDoctors = useMemo(
     () =>
       sourceFacilities.map((doc) => {
         const distanceKm = activeOrigin ? calculateDistanceKm(activeOrigin, [doc.lat, doc.lng]) : null;
-        const openNow = isScheduleOpenNow(doc.schedule, now);
+        const openState = resolveOpenState(doc.schedule, now);
+        const openNow = openState === OPEN_STATE.OPEN;
         const weekendReception = isWeekendReception(doc.schedule);
         const eveningReception = hasEveningReception(doc.schedule);
         const todayHours = getTodaySchedule(doc.schedule, now);
+        const weekSchedule = buildWeekSchedule(doc.schedule, now);
         const facilityType = resolveFacilityType(doc);
         const doctorProfile = resolveDoctorProfile(doc);
         const entityKind = doctorProfile ? 'doctor' : 'facility';
+        const telHref = toTelHref(doc.phone);
+        const websiteUrl = toSafeUrl(doc.website);
+        const servicePrices = Array.isArray(doc.servicePrices)
+          ? doc.servicePrices
+              .map((entry) => ({ service: entry?.service, label: formatPriceRange(entry) }))
+              .filter((entry) => entry.service && entry.label)
+          : EMPTY_SERVICES;
+        // Часть источников (OSM, ClinicsData) может прийти без features/services —
+        // раньше это роняло рендер на doc.features.children.
+        const features = doc.features || {};
+        const services = Array.isArray(doc.services) ? doc.services : EMPTY_SERVICES;
 
-        let trustBadges = [];
+        // Бейджи раньше дублировали друг друга: врач со стажем 20+ получал
+        // сразу «Опытный врач» и «Высший стаж», а с рейтингом 4.9 — ещё
+        // «Топ-врач» и «Популярный». Оставляем по одному, самому сильному.
+        const trustBadges = [];
         if (entityKind === 'doctor') {
-          if (doc.experience >= 15) trustBadges.push('Опытный врач');
           if (doc.experience >= 20) trustBadges.push('Высший стаж');
+          else if (doc.experience >= 15) trustBadges.push('Опытный врач');
+
           if (doc.rating >= 4.8) trustBadges.push('Топ-врач');
-          if (doc.rating >= 4.5) trustBadges.push('Популярный');
-          if (doc.features.children) trustBadges.push('Детский врач');
-        } else if (entityKind === 'facility') {
+          else if (doc.rating >= 4.5) trustBadges.push('Популярный');
+
+          if (features.children) trustBadges.push('Детский врач');
+        } else {
           if (doc.ownership === 'Государственная') trustBadges.push('Государственное');
-          trustBadges.push(doc.facilityType || 'Медучреждение');
+          trustBadges.push(facilityType || 'Медучреждение');
         }
 
         return {
           ...doc,
+          features,
+          services,
+          rating: Number(doc.rating) || 0,
+          experience: Number(doc.experience) || 0,
           distanceKm,
+          openState,
           openNow,
           weekendReception,
           eveningReception,
           todayHours,
+          weekSchedule,
+          telHref,
+          websiteUrl,
+          servicePrices,
           facilityType,
           doctorProfile,
           entityKind,
           trustBadges,
-          isFavorite: favorites.includes(doc.id),
         };
       }),
-    [activeOrigin, favorites, now, sourceFacilities],
+    [activeOrigin, now, sourceFacilities],
+  );
+
+  // Set вместо массива: раньше на каждую из ~1000 записей выполнялся
+  // линейный favorites.includes(), то есть O(записи × избранное).
+  const favoriteIds = useMemo(() => new Set(favorites), [favorites]);
+
+  const enrichedDoctors = useMemo(
+    () => baseEnrichedDoctors.map((doc) => ({ ...doc, isFavorite: favoriteIds.has(doc.id) })),
+    [baseEnrichedDoctors, favoriteIds],
   );
 
   useEffect(() => {
     enrichedDoctorsRef.current = enrichedDoctors;
   }, [enrichedDoctors]);
 
-  const clinics = useMemo(() => [...new Set(sourceFacilities.map((doc) => doc.clinic))].sort((left, right) => left.localeCompare(right, 'ru')), [sourceFacilities]);
-  const districts = useMemo(() => [...new Set(sourceFacilities.map((doc) => doc.district).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'ru')), [sourceFacilities]);
+  const clinics = useMemo(() => uniqueSorted(sourceFacilities.map((doc) => doc.clinic)), [sourceFacilities]);
+  const districts = useMemo(() => uniqueSorted(sourceFacilities.map((doc) => doc.district)), [sourceFacilities]);
   const doctorProfiles = useMemo(
-    () => [...new Set(sourceFacilities.map((doc) => resolveDoctorProfile(doc)).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'ru')),
+    () => uniqueSorted(sourceFacilities.map((doc) => resolveDoctorProfile(doc))),
     [sourceFacilities],
   );
-  const ownerships = useMemo(() => [...new Set(sourceFacilities.map((doc) => doc.ownership))].sort((left, right) => left.localeCompare(right, 'ru')), [sourceFacilities]);
+  const ownerships = useMemo(() => uniqueSorted(sourceFacilities.map((doc) => doc.ownership)), [sourceFacilities]);
   const facilityTypes = useMemo(
-    () => [...new Set(sourceFacilities.map((doc) => resolveFacilityType(doc)).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'ru')),
+    () => uniqueSorted(sourceFacilities.map((doc) => resolveFacilityType(doc))),
     [sourceFacilities],
   );
   const allServices = useMemo(
-    () => [...new Set(sourceFacilities.flatMap((doc) => doc.services || []))].sort((left, right) => left.localeCompare(right, 'ru')),
+    () => uniqueSorted(sourceFacilities.flatMap((doc) => doc.services || [])),
     [sourceFacilities],
   );
+
+  useEffect(() => {
+    districtSetRef.current = new Set(districts);
+    clinicSetRef.current = new Set(clinics);
+    facilityTypeSetRef.current = new Set(facilityTypes);
+    doctorProfileSetRef.current = new Set(doctorProfiles);
+    serviceSetRef.current = new Set(allServices);
+  }, [districts, clinics, facilityTypes, doctorProfiles, allServices]);
+
+  // Индекс подсказок строится ОДИН раз на набор данных. Раньше эта Map на
+  // несколько тысяч ключей пересобиралась на каждое нажатие клавиши.
+  const suggestionIndex = useMemo(() => {
+    const unique = new Map();
+    const add = (value, type) => {
+      if (!value) return;
+      const key = normalizeText(value);
+      if (key && !unique.has(key)) {
+        unique.set(key, { value, type, key });
+      }
+    };
+
+    for (const doc of sourceFacilities) {
+      add(doc.name, 'Имя');
+      add(doc.clinic, 'Клиника');
+      add(doc.specialty, 'Специальность');
+      add(doc.district, 'Район');
+      for (const service of doc.services || EMPTY_SERVICES) {
+        add(service, 'Услуга');
+      }
+    }
+
+    return [...unique.values()];
+  }, [sourceFacilities]);
 
   const searchSuggestions = useMemo(() => {
     if (!isSearchFocused) {
       return [];
     }
 
-    const query = normalizeText(searchQuery).trim();
+    const query = normalizeText(deferredSearchQuery).trim();
     if (query.length < 2) {
       return [];
     }
 
-    const unique = new Map();
-    for (let i = 0; i < sourceFacilities.length; i++) {
-      const doc = sourceFacilities[i];
-      if (doc.name) { const k = normalizeText(doc.name); if (!unique.has(k)) unique.set(k, { value: doc.name, type: 'Имя' }); }
-      if (doc.clinic) { const k = normalizeText(doc.clinic); if (!unique.has(k)) unique.set(k, { value: doc.clinic, type: 'Клиника' }); }
-      if (doc.specialty) { const k = normalizeText(doc.specialty); if (!unique.has(k)) unique.set(k, { value: doc.specialty, type: 'Специальность' }); }
-      if (doc.district) { const k = normalizeText(doc.district); if (!unique.has(k)) unique.set(k, { value: doc.district, type: 'Район' }); }
-      const services = doc.services;
-      if (services) {
-        for (let j = 0; j < services.length; j++) {
-          if (services[j]) { const k = normalizeText(services[j]); if (!unique.has(k)) unique.set(k, { value: services[j], type: 'Услуга' }); }
-        }
-      }
-    }
-
-    const results = [];
-    for (const item of unique.values()) {
-      if (normalizeText(item.value).includes(query)) {
-        results.push(item);
-      }
-    }
+    const results = suggestionIndex.filter((item) => item.key.includes(query));
 
     results.sort((left, right) => {
-      const leftText = normalizeText(left.value);
-      const rightText = normalizeText(right.value);
-      const leftStarts = leftText.startsWith(query);
-      const rightStarts = rightText.startsWith(query);
+      const leftStarts = left.key.startsWith(query);
+      const rightStarts = right.key.startsWith(query);
       if (leftStarts !== rightStarts) {
         return Number(rightStarts) - Number(leftStarts);
       }
-      return leftText.length - rightText.length;
+      return left.key.length - right.key.length;
     });
 
     return results.slice(0, 8);
-  }, [searchQuery, sourceFacilities, isSearchFocused]);
+  }, [deferredSearchQuery, suggestionIndex, isSearchFocused]);
 
   const filteredDoctors = useMemo(() => {
-    const query = normalizeText(searchQuery);
+    const query = normalizeText(deferredSearchQuery).trim();
     const routeTargetIds = new Set(routeTargets.map(t => t.id));
+    const selectedServiceList = selectedServices;
     const knownDoctorProfileQuery = doctorProfiles.find((profile) => normalizeText(profile) === query);
 
     return enrichedDoctors.filter((doc) => {
@@ -1084,7 +1385,8 @@ export default function App() {
       const matchesOwnership = selectedOwnership === 'all' || doc.ownership === selectedOwnership;
       const matchesRating = doc.rating >= minRating;
       const matchesExperience = doc.experience >= minExperience;
-      const matchesDistance = maxDistance === 0 || doc.distanceKm === null ? true : doc.distanceKm <= maxDistance;
+      // Скобки расставлены явно: без них тернарник читался как (a || b) ? true : c.
+      const matchesDistance = maxDistance === 0 || doc.distanceKm == null || doc.distanceKm <= maxDistance;
       const matchesOpen = !openOnly || doc.openNow;
       const matchesFavorites = !favoritesOnly || doc.isFavorite;
       const matchesWeekend = !weekendOnly || doc.weekendReception;
@@ -1092,7 +1394,8 @@ export default function App() {
       const matchesOnline = !onlineOnly || doc.features.onlineBooking;
       const matchesWheelchair = !wheelchairOnly || doc.features.wheelchair;
       const matchesChildren = !childrenOnly || doc.features.children;
-      const matchesServices = selectedServices.every((service) => doc.services.includes(service));
+      const matchesServices =
+        selectedServiceList.length === 0 || selectedServiceList.every((service) => doc.services.includes(service));
 
       return (
         matchesQuery &&
@@ -1117,7 +1420,7 @@ export default function App() {
     });
   }, [
     enrichedDoctors,
-    searchQuery,
+    deferredSearchQuery,
     doctorProfiles,
     selectedFacilityType,
     selectedClinic,
@@ -1184,10 +1487,129 @@ export default function App() {
     return list;
   }, [filteredDoctors, now, sortBy]);
 
-  const [visibleCount, setVisibleCount] = useState(30);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [expandedSchedules, setExpandedSchedules] = useState(() => new Set());
+
+  const toggleSchedule = useCallback((id) => {
+    setExpandedSchedules((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  // Отражаем фильтры в адресной строке через replaceState: ссылку можно
+  // переслать или сохранить, но история браузера не засоряется — иначе
+  // каждое движение ползунка добавляло бы запись, и «Назад» не работал бы.
+  const urlQuery = useMemo(
+    () =>
+      buildUrlQuery({
+        q: deferredSearchQuery,
+        clinic: selectedClinic,
+        district: selectedDistrict,
+        facilityType: selectedFacilityType,
+        doctorProfile: selectedDoctorProfile,
+        ownership: selectedOwnership,
+        cardDisplayMode,
+        sortBy,
+        services: selectedServices,
+        minRating,
+        minExperience,
+        maxDistance,
+        flags: [
+          openOnly && 'open',
+          favoritesOnly && 'fav',
+          weekendOnly && 'weekend',
+          eveningOnly && 'evening',
+          onlineOnly && 'online',
+          wheelchairOnly && 'wheelchair',
+          childrenOnly && 'children',
+        ].filter(Boolean),
+      }),
+    [
+      deferredSearchQuery,
+      selectedClinic,
+      selectedDistrict,
+      selectedFacilityType,
+      selectedDoctorProfile,
+      selectedOwnership,
+      cardDisplayMode,
+      sortBy,
+      selectedServices,
+      minRating,
+      minExperience,
+      maxDistance,
+      openOnly,
+      favoritesOnly,
+      weekendOnly,
+      eveningOnly,
+      onlineOnly,
+      wheelchairOnly,
+      childrenOnly,
+    ],
+  );
+
+  useEffect(() => {
+    const next = `${window.location.pathname}${urlQuery ? `?${urlQuery}` : ''}`;
+    if (next !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(null, '', next);
+    }
+  }, [urlQuery]);
+
+  const handleShare = useCallback(async () => {
+    const link = `${window.location.origin}${window.location.pathname}${urlQuery ? `?${urlQuery}` : ''}`;
+
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: 'МедКарта Казань', url: link });
+        return;
+      }
+      await navigator.clipboard.writeText(link);
+      showToast('Ссылка на подборку скопирована.', 'success');
+    } catch (error) {
+      // Пользователь закрыл системное окно «Поделиться» — это не ошибка.
+      if (error?.name === 'AbortError') {
+        return;
+      }
+      showToast('Не удалось скопировать ссылку. Скопируйте адрес из строки браузера.', 'warning');
+    }
+  }, [urlQuery, showToast]);
+
+  // Раньше пагинация не сбрасывалась при смене фильтра: после «показать ещё»
+  // новый поиск сразу отдавал сотни карточек и подвешивал прокрутку.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [
+    deferredSearchQuery,
+    selectedFacilityType,
+    selectedClinic,
+    selectedDistrict,
+    selectedDoctorProfile,
+    selectedOwnership,
+    cardDisplayMode,
+    selectedServices,
+    favoritesOnly,
+    openOnly,
+    weekendOnly,
+    eveningOnly,
+    onlineOnly,
+    wheelchairOnly,
+    childrenOnly,
+    minRating,
+    minExperience,
+    maxDistance,
+    sortBy,
+  ]);
 
   const favoritesCount = enrichedDoctors.filter((doc) => doc.isFavorite).length;
   const openCount = enrichedDoctors.filter((doc) => doc.openNow).length;
+  // Сколько записей фильтр «Открытые сейчас» прячет не потому, что они закрыты,
+  // а потому, что графика нет в данных. Молча терять половину базы нечестно.
+  const unknownScheduleCount = enrichedDoctors.filter((doc) => doc.openState === OPEN_STATE.UNKNOWN).length;
   const ratedDoctors = enrichedDoctors.filter((doc) => doc.rating > 0);
   const averageRating = ratedDoctors.length
     ? (ratedDoctors.reduce((sum, doc) => sum + doc.rating, 0) / ratedDoctors.length).toFixed(1)
@@ -1234,7 +1656,7 @@ export default function App() {
         if (candidates.length > 0) {
           const sorted = [...candidates].sort((a, b) => (a.distanceKm || Infinity) - (b.distanceKm || Infinity));
           const best = sorted.find(c => !foundTargets.some(t => t.id === c.id));
-          if (best && foundTargets.length < 5) {
+          if (best && foundTargets.length < MAX_ROUTE_STOPS) {
             foundTargets.push(best);
           }
         }
@@ -1244,7 +1666,7 @@ export default function App() {
         setRouteTargets(prev => {
           const merged = [...prev];
           foundTargets.forEach(ft => {
-            if (merged.length < 5 && !merged.some(t => t.id === ft.id)) {
+            if (merged.length < MAX_ROUTE_STOPS && !merged.some(t => t.id === ft.id)) {
               merged.push(ft);
             }
           });
@@ -1258,7 +1680,7 @@ export default function App() {
       setTargetStopsTrigger(null);
     } else if (buildRouteTrigger && enrichedDoctors.length > 0) {
       const bestMatch = sortedDoctors.find(d => !routeTargets.some(t => t.id === d.id));
-      if (bestMatch && routeTargets.length < 5) {
+      if (bestMatch && routeTargets.length < MAX_ROUTE_STOPS) {
         setRouteTargets(prev => [...prev, bestMatch]);
         setRouteData(null);
         setFlyToTarget([bestMatch.lat, bestMatch.lng]);
@@ -1270,26 +1692,32 @@ export default function App() {
   // Toggle favorite status
   const toggleFavorite = useCallback((id) => {
     setFavorites((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
-  }, []);
+  }, [setFavorites]);
 
   const toggleService = (service) => {
     setSelectedServices((current) => (current.includes(service) ? current.filter((item) => item !== service) : [...current, service]));
   };
 
   const handleRouteClick = useCallback((doc) => {
-    if (activeOrigin) {
-      if (routeTargets.length >= 5) {
-        alert('Достигнут лимит в 5 точек для маршрута.');
-        return;
-      }
-      setRouteTargets(prev => [...prev, doc]);
-      setRouteData(null);
-      // Плавный перелёт к добавленной точке
-      setFlyToTarget([doc.lat, doc.lng]);
-    } else {
-      alert('Точка отправления не найдена!');
+    if (!activeOrigin) {
+      showToast('Точка отправления не найдена. Разрешите геолокацию или перетащите красный маркер.', 'warning');
+      return;
     }
-  }, [activeOrigin, routeTargets]);
+
+    setRouteTargets((prev) => {
+      if (prev.length >= MAX_ROUTE_STOPS) {
+        showToast(`Достигнут лимит в ${MAX_ROUTE_STOPS} точек для маршрута.`, 'warning');
+        return prev;
+      }
+      if (prev.some((target) => target.id === doc.id)) {
+        return prev;
+      }
+
+      setRouteData(null);
+      setFlyToTarget([doc.lat, doc.lng]);
+      return [...prev, doc];
+    });
+  }, [activeOrigin, showToast]);
 
   const handleGoToNearest = () => {
     if (!nearestOpenDoctor) return;
@@ -1299,6 +1727,14 @@ export default function App() {
     setIsFollowingUser(false);
     setFlyToTarget([nearestOpenDoctor.lat, nearestOpenDoctor.lng]);
   };
+
+  // Ссылка на весь маршрут во внешних картах: там есть голосовое ведение,
+  // которого у нас нет. Яндекс принимает промежуточные точки, Apple — только
+  // конечную, поэтому buildExternalMapUrl разводит эти случаи.
+  const externalRouteUrl = useMemo(
+    () => buildExternalMapUrl(activeOrigin, routeTargets, travelMode),
+    [activeOrigin, routeTargets, travelMode],
+  );
 
   const stableSetRouteData = useCallback((data) => {
     setRouteData(data);
@@ -1410,8 +1846,12 @@ export default function App() {
                 <br />
                 <span className="text-base text-slate-800 dark:text-white">{doc.name}</span>
                 <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                  <span className={`rounded-full px-2 py-1 font-semibold ${doc.openNow ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'}`}>
-                    {doc.openNow ? 'Открыто' : 'Закрыто'}
+                  <span className={`rounded-full px-2 py-1 font-semibold ${doc.openState === OPEN_STATE.OPEN ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'}`}>
+                    {doc.openState === OPEN_STATE.OPEN
+                      ? 'Открыто'
+                      : doc.openState === OPEN_STATE.CLOSED
+                        ? 'Закрыто'
+                        : 'График не указан'}
                   </span>
                   <span className={`rounded-full px-2 py-1 font-semibold ${isGovernment ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200' : 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200'}`}>
                     {doc.ownership || 'Не указано'}
@@ -1471,7 +1911,7 @@ export default function App() {
     setMinExperience(0);
     setMaxDistance(0);
     setSortBy('recommendation');
-    setVisibleCount(30);
+    setVisibleCount(PAGE_SIZE);
   };
 
   const handleSearchSuggestionSelect = (value) => {
@@ -1561,6 +2001,8 @@ export default function App() {
     const isDoctorCard = doc.entityKind === 'doctor';
     const distanceLabel = doc.distanceKm == null ? 'Геолокация недоступна' : formatDistance(doc.distanceKm * 1000);
     const hasVisibleDescription = Boolean((doc.description || '').trim()) && !/данные из openstreetmap/i.test(String(doc.description));
+    const isScheduleOpen = expandedSchedules.has(doc.id);
+    const externalMapUrl = buildExternalMapUrl(activeOrigin, [doc], travelMode);
 
     return (
       <div
@@ -1575,13 +2017,22 @@ export default function App() {
               <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${isDoctorCard ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-100' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100'}`}>
                 {isDoctorCard ? 'Врач' : 'Учреждение'}
               </span>
-              {doc.openNow ? (
+              {doc.openState === OPEN_STATE.OPEN && (
                 <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100">
                   Открыто сейчас
                 </span>
-              ) : (
+              )}
+              {doc.openState === OPEN_STATE.CLOSED && (
                 <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500 dark:bg-slate-700 dark:text-slate-300">
                   Закрыто
+                </span>
+              )}
+              {doc.openState === OPEN_STATE.UNKNOWN && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full bg-slate-100/70 px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400 dark:bg-slate-700/60 dark:text-slate-400"
+                  title="В источнике данных нет расписания этого объекта"
+                >
+                  <HelpCircle size={12} aria-hidden="true" /> График не указан
                 </span>
               )}
             </div>
@@ -1609,6 +2060,22 @@ export default function App() {
           </div>
         )}
 
+        {/* Пометка о происхождении данных: запись взята с официального сайта
+            учреждения, и на неё можно перейти и проверить самому. */}
+        {doc.sourceUrl && (
+          <a
+            href={doc.sourceUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+            title={`Данные с официального сайта учреждения. Сверено ${doc.verifiedAt || ''}`}
+          >
+            <ShieldCheck size={13} aria-hidden="true" />
+            Проверено по официальному сайту
+            <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
+          </a>
+        )}
+
         <div className="mt-4 grid grid-cols-1 gap-3 text-sm text-slate-600 sm:grid-cols-2 dark:text-slate-300">
           <div className="flex items-center gap-2">
             {isDoctorCard ? <UserRound size={16} className="shrink-0 text-slate-400 dark:text-slate-500" /> : <Hospital size={16} className="shrink-0 text-slate-400 dark:text-slate-500" />}
@@ -1619,23 +2086,83 @@ export default function App() {
             <span className="break-words">{doc.address}</span>
           </div>
           <div className="flex items-center gap-2">
-            <Clock size={16} className="shrink-0 text-slate-400 dark:text-slate-500" />
-            <span>Сегодня: {doc.todayHours}</span>
+            <Clock size={16} className="shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+            {doc.weekSchedule ? (
+              <button
+                type="button"
+                onClick={() => toggleSchedule(doc.id)}
+                aria-expanded={isScheduleOpen}
+                className="inline-flex items-center gap-1 text-left underline decoration-dotted underline-offset-4 transition-colors hover:text-blue-600 dark:hover:text-blue-400"
+              >
+                Сегодня: {doc.todayHours}
+                {isScheduleOpen ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+              </button>
+            ) : (
+              <span className="text-slate-400 dark:text-slate-500">График не указан</span>
+            )}
           </div>
           <div className="flex items-center gap-2">
-            {isDoctorCard ? <TrendingUp size={16} className="shrink-0 text-slate-400 dark:text-slate-500" /> : <Building2 size={16} className="shrink-0 text-slate-400 dark:text-slate-500" />}
-            <span>{isDoctorCard ? `Стаж: ${doc.experience > 0 ? `${doc.experience} лет` : 'н/д'}` : `Тип: ${doc.facilityType || doc.specialty}`}</span>
+            {isDoctorCard ? <TrendingUp size={16} className="shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" /> : <Building2 size={16} className="shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
+            <span>{isDoctorCard ? `Стаж: ${doc.experience > 0 ? `${doc.experience} лет` : 'не указан'}` : `Тип: ${doc.facilityType || doc.specialty}`}</span>
           </div>
         </div>
 
+        {/* Расписание на неделю — данные лежали в doc.schedule, но наружу
+            выходил только сегодняшний день. */}
+        {isScheduleOpen && doc.weekSchedule && (
+          <div className="mt-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Расписание работы на неделю</caption>
+              <tbody>
+                {doc.weekSchedule.map((day) => (
+                  <tr
+                    key={day.key}
+                    className={`border-b border-slate-100 last:border-0 dark:border-slate-700/70 ${
+                      day.isToday ? 'bg-blue-50 font-semibold dark:bg-blue-900/30' : ''
+                    }`}
+                  >
+                    <th scope="row" className="px-3 py-1.5 text-left font-medium text-slate-600 dark:text-slate-300">
+                      {day.label}
+                      {day.isToday && <span className="ml-2 text-[10px] uppercase tracking-wider text-blue-600 dark:text-blue-400">сегодня</span>}
+                    </th>
+                    <td className={`px-3 py-1.5 text-right ${day.isDayOff ? 'text-slate-400 dark:text-slate-500' : 'text-slate-700 dark:text-slate-200'}`}>
+                      {day.value}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Цены: диапазоны лежали в servicePrices и никогда не показывались. */}
+        {doc.servicePrices.length > 0 && (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+            <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+              <Wallet size={14} aria-hidden="true" /> Стоимость услуг
+            </div>
+            <ul className="space-y-1">
+              {doc.servicePrices.map((price) => (
+                <li key={price.service} className="flex items-baseline justify-between gap-3 text-sm">
+                  <span className="text-slate-600 dark:text-slate-300">{price.service}</span>
+                  <span className="shrink-0 font-semibold text-slate-800 tabular-nums dark:text-white">{price.label}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-[11px] leading-4 text-slate-400 dark:text-slate-500">
+              Ориентировочные цены. Уточняйте в учреждении.
+            </p>
+          </div>
+        )}
+
         <div className="mt-4 flex flex-wrap gap-2">
           {isDoctorCard ? (
-            doc.rating > 0 ? (
+            // Пустой бейдж «Рейтинг: н/д» стоял почти на половине карточек и
+            // ничего не сообщал — теперь его просто нет.
+            doc.rating > 0 && (
               <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-900 dark:text-amber-200">
                 <Star size={13} className="inline-block -translate-y-[1px]" fill="currentColor" /> {doc.rating}
               </span>
-            ) : (
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">Рейтинг: н/д</span>
             )
           ) : (
             <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200">{doc.facilityType || doc.specialty}</span>
@@ -1658,6 +2185,32 @@ export default function App() {
 
         {hasVisibleDescription && <p className="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-400">{doc.description}</p>}
 
+        {/* Контакты: телефон и сайт лежали в данных, но в интерфейс не выходили.
+            На телефоне звонок — основное целевое действие, поэтому он первым. */}
+        {(doc.telHref || doc.websiteUrl) && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {doc.telHref && (
+              <a
+                href={doc.telHref}
+                className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+              >
+                <Phone size={16} aria-hidden="true" /> {doc.phone}
+              </a>
+            )}
+            {doc.websiteUrl && (
+              <a
+                href={doc.websiteUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600"
+              >
+                <Globe size={16} aria-hidden="true" /> Сайт
+                <ExternalLink size={13} className="opacity-60" aria-hidden="true" />
+              </a>
+            )}
+          </div>
+        )}
+
         <div className={`mt-4 grid gap-2 ${isMobile ? 'grid-cols-1' : 'grid-cols-2'}`}>
           {renderRouteButton(doc, false)}
           <button
@@ -1669,6 +2222,17 @@ export default function App() {
             {doc.isFavorite ? 'В избранном' : 'В избранное'}
           </button>
         </div>
+
+        {externalMapUrl && (
+          <a
+            href={externalMapUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-700 dark:border-slate-600 dark:text-slate-400 dark:hover:text-slate-200"
+          >
+            <ExternalLink size={15} aria-hidden="true" /> {externalMapLabel()}
+          </a>
+        )}
       </div>
     );
   };
@@ -1714,6 +2278,8 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                aria-label={isSidebarCollapsed ? 'Показать панель поиска' : 'Скрыть панель поиска'}
+                aria-expanded={!isSidebarCollapsed}
                 className="absolute -right-5 top-1/2 z-[1010] flex h-16 w-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-r-xl border border-l-0 border-slate-200 bg-white shadow-[2px_0_8px_rgba(0,0,0,0.1)] transition-colors hover:bg-slate-50 hover:text-blue-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400 dark:hover:text-blue-400"
               >
                 {isSidebarCollapsed ? <ChevronRight size={18} strokeWidth={3} /> : <ChevronLeft size={18} strokeWidth={3} />}
@@ -1748,6 +2314,8 @@ export default function App() {
                       type="button"
                       onClick={() => setIsDarkMode((current) => !current)}
                       title={isDarkMode ? 'Светлая тема' : 'Тёмная тема'}
+                      aria-label={isDarkMode ? 'Включить светлую тему' : 'Включить тёмную тему'}
+                      aria-pressed={isDarkMode}
                       className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-600 transition-all hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400"
                     >
                       {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
@@ -1763,26 +2331,40 @@ export default function App() {
 
               <div className="relative mt-3 flex items-center gap-2">
                 <div className="relative flex-1">
-                  <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+                  <label className="sr-only" htmlFor="facility-search">
+                    Поиск по врачу, клинике, адресу или услуге
+                  </label>
+                  <Search className="absolute left-3 top-2.5 text-slate-400" size={18} aria-hidden="true" />
                   <input
-                    type="text"
+                    id="facility-search"
+                    type="search"
+                    autoComplete="off"
+                    maxLength={100}
                     placeholder="Поиск по врачу, клинике, адресу, услуге"
                     value={searchQuery}
                     onChange={(event) => setSearchQuery(event.target.value)}
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => setIsSearchFocused(false)}
+                    role="combobox"
+                    aria-expanded={isSearchFocused && searchSuggestions.length > 0}
+                    aria-controls="search-suggestions"
                     className="w-full rounded-xl border border-slate-200 bg-slate-100 py-2.5 pl-10 pr-4 text-sm transition-all focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-700 dark:text-white"
                   />
                 </div>
                 <button
+                  type="button"
                   onClick={clearFilters}
                   title="Сбросить все фильтры"
+                  aria-label="Сбросить все фильтры"
                   className="flex h-[42px] w-[42px] items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition-colors hover:bg-slate-50 hover:text-red-500 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:text-red-400"
                 >
-                  <RefreshCcw size={18} />
+                  <RefreshCcw size={18} aria-hidden="true" />
                 </button>
                 <button
+                  type="button"
                   onClick={() => setIsFiltersCollapsed(!isFiltersCollapsed)}
+                  aria-expanded={!isFiltersCollapsed}
+                  aria-label={isFiltersCollapsed ? 'Показать фильтры' : 'Скрыть фильтры'}
                   title={isFiltersCollapsed ? "Показать фильтры" : "Скрыть фильтры"}
                   className={`flex h-[42px] w-[42px] items-center justify-center rounded-xl border transition-colors ${!isFiltersCollapsed
                       ? 'border-blue-200 bg-blue-50 text-blue-600 dark:border-blue-800 dark:bg-blue-900/50 dark:text-blue-400'
@@ -1793,10 +2375,17 @@ export default function App() {
                 </button>
 
                 {isSearchFocused && searchSuggestions.length > 0 && (
-                  <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-600 dark:bg-slate-800">
+                  <div
+                    id="search-suggestions"
+                    role="listbox"
+                    aria-label="Варианты поиска"
+                    className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-600 dark:bg-slate-800"
+                  >
                     {searchSuggestions.map((item) => (
                       <button
-                        key={`${item.type}-${item.value}`}
+                        key={`${item.type}-${item.key}`}
+                        role="option"
+                        aria-selected="false"
                         type="button"
                         onMouseDown={(event) => {
                           event.preventDefault();
@@ -2039,12 +2628,30 @@ export default function App() {
                   <div className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200">
                     <Building2 size={16} /> Результаты
                   </div>
-                  <div className="space-y-2 text-sm text-slate-500">
+                  <div className="space-y-2 text-sm text-slate-500 dark:text-slate-400">
                     <p>
                       {sortedDoctors.length} карточек из {sourceFacilities.length}
                     </p>
                     <p>Открытых сейчас: {openCount}</p>
                     <p>Средний рейтинг по базе: {averageRating}</p>
+                  </div>
+
+                  {openOnly && unknownScheduleCount > 0 && (
+                    <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                      Ещё {unknownScheduleCount} объектов скрыто: у них не указан график работы, поэтому
+                      определить, открыты ли они сейчас, невозможно. Снимите фильтр «Открытые сейчас»,
+                      чтобы их увидеть.
+                    </p>
+                  )}
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={handleShare}
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600"
+                    >
+                      <Share2 size={14} aria-hidden="true" /> Поделиться подборкой
+                    </button>
                   </div>
                 </section>
               </div>
@@ -2052,15 +2659,52 @@ export default function App() {
               <div className="mt-4 space-y-4">
                 {sortedDoctors.length === 0 ? (
                   <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400">
-                    <p className="font-semibold text-slate-700 dark:text-slate-300">Ничего не найдено</p>
-                    <p className="mt-1">Ослабьте фильтры или очистите поиск, чтобы вернуть карточки.</p>
-                    <button
-                      type="button"
-                      onClick={clearFilters}
-                      className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-blue-700"
-                    >
-                      <RefreshCcw size={16} /> Сбросить фильтры
-                    </button>
+                    {/* Пустое состояние теперь называет конкретную причину:
+                        общее «ослабьте фильтры» не подсказывает, какой снять. */}
+                    {favoritesOnly && favoritesCount === 0 ? (
+                      <>
+                        <p className="font-semibold text-slate-700 dark:text-slate-300">В избранном пока пусто</p>
+                        <p className="mt-1">
+                          Нажмите на сердечко в любой карточке — она появится здесь и сохранится после перезагрузки.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setFavoritesOnly(false)}
+                          className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-blue-700"
+                        >
+                          <HeartOff size={16} aria-hidden="true" /> Показать все карточки
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-semibold text-slate-700 dark:text-slate-300">Ничего не найдено</p>
+                        <p className="mt-1">
+                          {openOnly && unknownScheduleCount > 0
+                            ? `Возможно, дело в фильтре «Открытые сейчас»: у ${unknownScheduleCount} объектов график не указан, и они не проходят проверку.`
+                            : searchQuery
+                              ? `По запросу «${searchQuery}» совпадений нет. Проверьте раскладку или попробуйте более общее слово.`
+                              : 'Ослабьте фильтры или очистите поиск, чтобы вернуть карточки.'}
+                        </p>
+                        <div className="mt-4 flex flex-wrap justify-center gap-2">
+                          {openOnly && (
+                            <button
+                              type="button"
+                              onClick={() => setOpenOnly(false)}
+                              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                            >
+                              Снять «Открытые сейчас»
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={clearFilters}
+                            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-blue-700"
+                          >
+                            <RefreshCcw size={16} aria-hidden="true" /> Сбросить фильтры
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ) : cardDisplayMode === 'all' && doctorCards.length > 0 && facilityCards.length > 0 ? (
                   <>
@@ -2071,7 +2715,7 @@ export default function App() {
                     {doctorCards.length > visibleCount && (
                       <button
                         type="button"
-                        onClick={() => setVisibleCount((c) => c + 30)}
+                        onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
                         className="w-full rounded-2xl border border-blue-200 bg-blue-50 py-3 text-sm font-semibold text-blue-700 transition-all hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800"
                       >
                         Показать ещё ({doctorCards.length - visibleCount} врачей)
@@ -2084,7 +2728,7 @@ export default function App() {
                     {facilityCards.length > visibleCount && (
                       <button
                         type="button"
-                        onClick={() => setVisibleCount((c) => c + 30)}
+                        onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
                         className="w-full rounded-2xl border border-emerald-200 bg-emerald-50 py-3 text-sm font-semibold text-emerald-700 transition-all hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-800"
                       >
                         Показать ещё ({facilityCards.length - visibleCount} учреждений)
@@ -2097,7 +2741,7 @@ export default function App() {
                     {sortedDoctors.length > visibleCount && (
                       <button
                         type="button"
-                        onClick={() => setVisibleCount((c) => c + 30)}
+                        onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
                         className="w-full rounded-2xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600"
                       >
                         Показать ещё ({sortedDoctors.length - visibleCount} карточек)
@@ -2167,10 +2811,10 @@ export default function App() {
                     <div key={target.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/50 bg-white/60 p-2.5 shadow-sm dark:border-slate-700/50 dark:bg-slate-800/60">
                       {routeTargets.length > 1 && (
                         <div className="flex flex-col gap-0.5">
-                          <button type="button" onClick={() => moveRouteTarget(idx, idx - 1)} disabled={idx === 0} className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
+                          <button type="button" onClick={() => moveRouteTarget(idx, idx - 1)} disabled={idx === 0} aria-label="Переместить точку выше"  className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
                             <ChevronUp size={14} />
                           </button>
-                          <button type="button" onClick={() => moveRouteTarget(idx, idx + 1)} disabled={idx === routeTargets.length - 1} className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
+                          <button type="button" onClick={() => moveRouteTarget(idx, idx + 1)} disabled={idx === routeTargets.length - 1} aria-label="Переместить точку ниже"  className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
                             <ChevronDown size={14} />
                           </button>
                         </div>
@@ -2179,7 +2823,7 @@ export default function App() {
                         <div className="text-[13px] font-bold leading-tight text-slate-800 dark:text-white">{idx + 1}. {target.clinic || target.name}</div>
                         <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate">{target.address}</div>
                       </div>
-                      <button onClick={() => removeFromRoute(target.id)} className="shrink-0 rounded-lg p-1 text-slate-400 transition-colors active:bg-red-50 dark:active:bg-red-900/30">
+                      <button type="button" aria-label="Убрать точку из маршрута" onClick={() => removeFromRoute(target.id)} className="shrink-0 rounded-lg p-1 text-slate-400 transition-colors active:bg-red-50 dark:active:bg-red-900/30">
                         <XCircle size={16} />
                       </button>
                     </div>
@@ -2188,15 +2832,17 @@ export default function App() {
               </div>
 
               <div className="flex gap-2 border-y border-slate-100 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-700">
-                {[
-                  { id: 'driving', icon: Car },
-                  { id: 'foot', icon: Footprints },
-                  { id: 'bike', icon: Bike },
-                ].map((mode) => (
-                  <button key={mode.id} type="button" onClick={() => { setTravelMode(mode.id); setRouteData(null); }}
+                {TRAVEL_MODE_OPTIONS.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    aria-label={mode.label}
+                    aria-pressed={travelMode === mode.id}
+                    title={mode.label}
+                    onClick={() => { setTravelMode(mode.id); setRouteData(null); }}
                     className={`flex flex-1 items-center justify-center rounded-xl py-2 transition-all ${travelMode === mode.id ? 'bg-white text-blue-600 shadow-sm dark:bg-slate-800 dark:text-blue-400' : 'text-slate-400 dark:text-slate-500'}`}
                   >
-                    <mode.icon size={20} />
+                    <mode.icon size={20} aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -2229,6 +2875,16 @@ export default function App() {
                     Редактировать маршрут
                   </button>
                 )}
+                {externalRouteUrl && (
+                  <a
+                    href={externalRouteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white py-3 font-semibold text-slate-600 transition-colors active:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                  >
+                    <ExternalLink size={16} aria-hidden="true" /> {externalMapLabel()}
+                  </a>
+                )}
                 <button type="button" onClick={clearRoute} className="w-full rounded-xl border border-slate-200 bg-white py-3 font-semibold text-red-500 transition-colors active:bg-red-50 dark:border-slate-600 dark:bg-slate-800 dark:active:bg-red-900/30">
                   Очистить маршрут
                 </button>
@@ -2238,15 +2894,15 @@ export default function App() {
 
           {/* Navigation buttons */}
           <div className="mobile-bottom-bar flex items-center justify-around px-2 py-2">
-            <button type="button" onClick={() => setIsMobileFiltersOpen(true)} className="flex flex-col items-center gap-1 rounded-2xl px-5 py-2 text-blue-600 transition-all active:bg-blue-50 dark:text-blue-400 dark:active:bg-slate-700">
+            <button type="button" onClick={() => setIsMobileFiltersOpen(true)} aria-label="Открыть поиск и фильтры" className="flex flex-col items-center gap-1 rounded-2xl px-5 py-2 text-blue-600 transition-all active:bg-blue-50 dark:text-blue-400 dark:active:bg-slate-700">
               <Search size={22} />
               <span className="text-[11px] font-semibold">Поиск</span>
             </button>
-            <button type="button" onClick={() => setIsAIAssistantOpen(current => !current)} className="flex flex-col items-center gap-1 rounded-2xl px-5 py-2 text-violet-600 transition-all active:bg-violet-50 dark:text-violet-400 dark:active:bg-slate-700">
+            <button type="button" onClick={() => setIsAIAssistantOpen(current => !current)} aria-label="Открыть AI-ассистента" className="flex flex-col items-center gap-1 rounded-2xl px-5 py-2 text-violet-600 transition-all active:bg-violet-50 dark:text-violet-400 dark:active:bg-slate-700">
               <Bot size={22} />
               <span className="text-[11px] font-semibold">Помощник</span>
             </button>
-            <button type="button" onClick={resetToGPS} className={`flex flex-col items-center gap-1 rounded-2xl px-5 py-2 transition-all active:bg-blue-50 dark:active:bg-slate-700 ${(isFollowingUser && !isManualOrigin) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}>
+            <button type="button" onClick={resetToGPS} aria-label="Вернуться к моему местоположению" className={`flex flex-col items-center gap-1 rounded-2xl px-5 py-2 transition-all active:bg-blue-50 dark:active:bg-slate-700 ${(isFollowingUser && !isManualOrigin) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-500 dark:text-slate-400'}`}>
               <MapPin size={22} />
               <span className="text-[10px] font-semibold">Местоположение</span>
             </button>
@@ -2325,10 +2981,10 @@ export default function App() {
                   >
                     {isMobile && routeTargets.length > 1 && (
                       <div className="flex flex-col gap-0.5">
-                        <button type="button" onClick={() => moveRouteTarget(idx, idx - 1)} disabled={idx === 0} className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
+                        <button type="button" onClick={() => moveRouteTarget(idx, idx - 1)} disabled={idx === 0} aria-label="Переместить точку выше"  className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
                           <ChevronUp size={14} />
                         </button>
-                        <button type="button" onClick={() => moveRouteTarget(idx, idx + 1)} disabled={idx === routeTargets.length - 1} className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
+                        <button type="button" onClick={() => moveRouteTarget(idx, idx + 1)} disabled={idx === routeTargets.length - 1} aria-label="Переместить точку ниже"  className="rounded p-0.5 text-slate-400 disabled:opacity-20 active:bg-slate-100 dark:active:bg-slate-700">
                           <ChevronDown size={14} />
                         </button>
                       </div>
@@ -2342,7 +2998,7 @@ export default function App() {
                       <div className="text-[13px] font-bold leading-tight text-slate-800 dark:text-white">{idx + 1}. {target.clinic || target.name}</div>
                       <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate">{target.address}</div>
                     </div>
-                    <button onClick={() => removeFromRoute(target.id)} className="shrink-0 rounded-lg p-1 text-slate-400 transition-colors hover:text-red-500 active:bg-red-50 dark:active:bg-red-900/30">
+                    <button type="button" aria-label="Убрать точку из маршрута" onClick={() => removeFromRoute(target.id)} className="shrink-0 rounded-lg p-1 text-slate-400 transition-colors hover:text-red-500 active:bg-red-50 dark:active:bg-red-900/30">
                       <XCircle size={16} />
                     </button>
                   </div>
@@ -2360,21 +3016,20 @@ export default function App() {
             )}
 
             <div className="flex gap-2 border-b border-slate-100 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-700">
-              {[
-                { id: 'driving', icon: Car },
-                { id: 'foot', icon: Footprints },
-                { id: 'bike', icon: Bike },
-              ].map((mode) => (
+              {TRAVEL_MODE_OPTIONS.map((mode) => (
                 <button
                   key={mode.id}
                   type="button"
+                  aria-label={mode.label}
+                  aria-pressed={travelMode === mode.id}
+                  title={mode.label}
                   onClick={() => {
                     setTravelMode(mode.id);
                     setRouteData(null);
                   }}
                   className={`flex flex-1 items-center justify-center rounded-xl py-2 transition-all ${travelMode === mode.id ? 'bg-white text-blue-600 shadow-sm dark:bg-slate-800 dark:text-blue-400' : 'text-slate-400 hover:bg-slate-100 dark:text-slate-500 dark:hover:bg-slate-600'}`}
                 >
-                  <mode.icon size={20} />
+                  <mode.icon size={20} aria-hidden="true" />
                 </button>
               ))}
             </div>
@@ -2406,6 +3061,16 @@ export default function App() {
                 <button type="button" onClick={() => setIsRouteStarted(false)} className="w-full rounded-xl bg-slate-200 py-3 font-semibold text-slate-700 transition-colors hover:bg-slate-300 dark:bg-slate-600 dark:text-white dark:hover:bg-slate-500">
                   Редактировать маршрут
                 </button>
+              )}
+              {externalRouteUrl && (
+                <a
+                  href={externalRouteUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white py-3 font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                >
+                  <ExternalLink size={16} aria-hidden="true" /> {externalMapLabel()}
+                </a>
               )}
               <button type="button" onClick={clearRoute} className="w-full rounded-xl border border-slate-200 bg-white py-3 font-semibold text-red-500 transition-colors hover:bg-red-50 dark:border-slate-600 dark:bg-slate-800 dark:hover:bg-red-900/30">
                 Очистить весь маршрут
@@ -2461,6 +3126,7 @@ export default function App() {
             <button
               type="button"
               onClick={resetToGPS}
+              aria-label="Вернуться к моему местоположению"
               className={`absolute bottom-6 right-6 z-[1000] rounded-full border-2 p-3 shadow-lg transition-all ${(isFollowingUser && !isManualOrigin) ? 'border-blue-700 bg-blue-600 text-white hover:bg-blue-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:bg-slate-600'}`}
               title="Вернуться к моему местоположению"
             >
@@ -2470,6 +3136,8 @@ export default function App() {
             <button
               type="button"
               onClick={() => setIsAIAssistantOpen(current => !current)}
+              aria-label="Открыть AI-ассистента"
+              aria-expanded={isAIAssistantOpen}
               className="absolute bottom-[88px] right-6 z-[1000] rounded-full bg-violet-600 p-3 text-white shadow-[0_4px_20px_rgba(124,58,237,0.4)] transition-all hover:scale-105 hover:bg-violet-700"
               title="AI-Ассистент"
             >
@@ -2478,13 +3146,19 @@ export default function App() {
           </>
         )}
 
-        <AIAssistant 
-          isOpen={isAIAssistantOpen} 
-          onClose={() => setIsAIAssistantOpen(false)} 
-          onApplyTriage={handleApplyTriage}
-          isMobile={isMobile}
-        />
+        {isAIAssistantOpen && (
+          <Suspense fallback={null}>
+            <AIAssistant
+              isOpen={isAIAssistantOpen}
+              onClose={() => setIsAIAssistantOpen(false)}
+              onApplyTriage={handleApplyTriage}
+              isMobile={isMobile}
+            />
+          </Suspense>
+        )}
       </main>
+
+      <Toast toast={toast} onDismiss={dismissToast} />
     </div>
   );
 }
