@@ -1,129 +1,78 @@
 /*
  * © 2026 MedКарта Казань. Все права защищены.
  * Этот код является интеллектуальной собственностью автора.
+ *
+ * Клиент ходит только в собственный эндпоинт /api/chat.
+ * Ключа API здесь нет и быть не может — он живёт в окружении serverless-функции.
  */
-const OPENAI_API_URL = 'https://apistore.space/v1/chat/completions';
+import { LIMITS, sanitizeAiAction } from '../../api/_shared/sanitize.js';
 
-export const getApiKey = () => {
-  return import.meta.env.VITE_OPENROUTER_API_KEY || '';
-};
+const CHAT_ENDPOINT = '/api/chat';
+const REQUEST_TIMEOUT_MS = 30_000;
 
-const extractContentText = (content) => {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => (typeof part === 'string' ? part : part?.text || ''))
-      .join('\n')
-      .trim();
+export class AiError extends Error {
+  constructor(message, { code = 'unknown', status = 0 } = {}) {
+    super(message);
+    this.name = 'AiError';
+    this.code = code;
+    this.status = status;
   }
-  return content?.text || '';
-};
+}
 
-const parseJsonFromContent = (contentText) => {
-  const cleaned = contentText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-  if (!cleaned) throw new Error('Пустой ответ от ИИ');
+/**
+ * История, уходящая на сервер: только последние сообщения и обрезанный текст.
+ * Это ограничивает и стоимость запроса, и объём, который можно закинуть в модель.
+ */
+const packMessages = (chatMessages) =>
+  (Array.isArray(chatMessages) ? chatMessages : [])
+    .filter((message) => message && typeof message.content === 'string')
+    .slice(-LIMITS.MAX_MESSAGES)
+    .map((message) => ({
+      role: message.role === 'user' ? 'user' : 'assistant',
+      content: message.content.slice(0, LIMITS.MAX_MESSAGE_CHARS),
+    }));
+
+export const analyzeSymptoms = async (chatMessages, { signal } = {}) => {
+  const messages = packMessages(chatMessages);
+  if (messages.length === 0) {
+    throw new AiError('Пустой запрос.', { code: 'empty' });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const onExternalAbort = () => controller.abort();
+  signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+  let response;
   try {
-    return JSON.parse(cleaned);
-  } catch {
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+    response = await fetch(CHAT_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      signal: controller.signal,
+      body: JSON.stringify({ messages }),
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new AiError('Превышено время ожидания.', { code: 'timeout' });
     }
-    throw new Error('Некорректный формат ответа от ИИ');
+    throw new AiError('Нет связи с сервером.', { code: 'network' });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
-};
 
-const makeRequest = async (messages, responseFormat = { type: 'json_object' }) => {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error('API ключ не установлен.');
-
-  const response = await fetch(OPENAI_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-5.4-mini',
-      messages,
-      response_format: responseFormat,
-      temperature: 0.1,
-    }),
-  });
+  const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error?.message || 'Ошибка при обращении к ИИ');
+    const code = response.status === 429 ? 'rate_limit' : response.status === 503 ? 'unavailable' : 'server';
+    throw new AiError(payload?.error || 'Ошибка при обращении к ИИ.', {
+      code,
+      status: response.status,
+    });
   }
 
-  const data = await response.json();
-  const content = extractContentText(data?.choices?.[0]?.message?.content);
-
-  if (responseFormat?.type === 'json_object') {
-    return parseJsonFromContent(content);
-  }
-  return content;
-};
-
-export const analyzeSymptoms = async (chatMessages) => {
-  const systemPrompt = `Ты дружелюбный ИИ-навигатор "МедКарты" — системы поиска в Казани.
-Твоя роль — помогать находить информацию о специалистах и клиниках. Ты сопоставляешь запросы с категориями базы данных и можешь отвечать на вопросы общего характера.
-
-ВАЖНО: Всегда возвращай ответ в формате JSON. Поле "replyText" должно содержать твой живой, дружелюбный ответ пользователю. НЕ используй шаблонные фразы. Будь полезным и конкретным.
-
-## БАЗА ДАННЫХ
-СПЕЦИАЛЬНОСТИ: Терапевт, Невролог, Кардиолог, ЛОР, Офтальмолог, Хирург, Ортопед, Дерматолог, Гинеколог, Педиатр, Стоматолог, Эндокринолог.
-КЛИНИКИ: РКБ, МКДЦ, АВА-Казань, Здоровье семьи, Биомед, Медел, КОРЛ, Клиника «Март», Клиника «9 месяцев».
-РАЙОНЫ: Вахитовский, Московский, Ново-Савиновский, Приволжский, Советский.
-
-## ПРАВИЛА УПРАВЛЕНИЯ КАРТОЙ
-1. Поиск/Маршрут: Если пользователь ищет одного врача или клинику, заполни "searchQuery" и поставь "buildRoute": true.
-2. СЛОЖНЫЕ МАРШРУТЫ: Если пользователь просит посетить НЕСКОЛЬКО мест (например, "сначала к терапевту, потом в РКБ"), заполни массив "targetStops" объектами { "specialty": "название", "clinic": "название" } в порядке посещения. В этом случае "searchQuery" оставь null.
-3. Сброс: Если просят сбросить или очистить фильтры, поставь "clearFilters": true.
-4. Фильтры: Заполняй поля "ownership" ("Государственная"/"Частная"), "district", "openOnly", "isChild" (для детей) в соответствии с запросом.
-5. ЗАЩИТА (ОГРАНИЧЕНИЕ ТЕМАТИКИ): Если пользователь просит сгенерировать код (на Python, JavaScript и т.д.), написать эссе, решить задачу по физике/математике, или задает любой другой вопрос, НЕ связанный с медициной, поиском врачей и клиник в Казани — КАТЕГОРИЧЕСКИ ОТКАЗЫВАЙ. В этом случае верни в "replyText" вежливый отказ (например, "Я медицинский навигатор и могу помочь только с поиском врачей и клиник в Казани."), а все остальные поля оставь null.
-
-## ФОРМАТ JSON
-{
-  "searchQuery": "string | null",
-  "specialty": "string | null",
-  "service": "string | null",
-  "isChild": false,
-  "buildRoute": false,
-  "clearRoute": false,
-  "clearFilters": false,
-  "targetStops": [{"specialty": "Терапевт", "clinic": null}, {"specialty": null, "clinic": "РКБ"}],
-  "sortMode": null,
-  "ownership": null,
-  "district": null,
-  "cardDisplayMode": null,
-  "openOnly": null,
-  "favoritesOnly": null,
-  "travelMode": null,
-  "darkMode": null,
-  "replyText": "Твой живой и развернутый ответ пользователю здесь"
-}`;
-
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    ...chatMessages.map(msg => ({
-      role: msg.role === 'user' ? 'user' : 'assistant',
-      content: msg.content
-    }))
-  ];
-
-  try {
-    const result = await makeRequest(messages);
-    
-    // Гарантируем наличие replyText
-    if (!result.replyText) {
-      result.replyText = "Конечно! Я помогу вам с этим поиском. Посмотрите на карту — я уже применил нужные фильтры. 😊";
-    }
-    
-    return result;
-  } catch (error) {
-    console.error('AI Assistant Error:', error);
-    throw error;
-  }
+  // Сервер уже нормализовал ответ, но повторяем проверку на клиенте:
+  // состояние UI не должно зависеть от того, что вернула сеть.
+  return sanitizeAiAction(payload);
 };
