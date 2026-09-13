@@ -37,3 +37,6 @@ scratch/
 .eslintcache
 coverage/
 *.tsbuildinfo
+# Private proprietary databases
+*.full.js
+src/*.full.js
