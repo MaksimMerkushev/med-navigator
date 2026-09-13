@@ -20,7 +20,6 @@ import {
   ChevronRight,
   Clock,
   Footprints,
-  Gauge,
   Heart,
   HeartOff,
   Hospital,
@@ -31,14 +30,12 @@ import {
   RefreshCcw,
   Search,
   ShieldCheck,
-  Sparkles,
-  SlidersHorizontal,
   Star,
   Sun,
-  Target,
   TrendingUp,
   UserRound,
   XCircle,
+  X,
   Bot,
   GripVertical,
   Phone,
@@ -53,6 +50,7 @@ import { verifiedDoctors } from './verifiedDoctors';
 import { kazanFacilities } from './kazanFacilities';
 import { ClinicsData } from './ClinicsData';
 import Toast, { useToast } from './Toast';
+import SearchFilters from './SearchFilters';
 import { SORT_MODES } from '../api/_shared/sanitize.js';
 import { useDebouncedValue } from './hooks/useDebouncedValue';
 import { isBoolean, isStringIdArray, useLocalStorageState } from './hooks/useLocalStorageState';
@@ -90,7 +88,7 @@ const createBeautifulArrow = (rawColor, isUser = false, rawLabel = null) => {
 
   const svgHtml = isUser
     ? '<div class="user-location-marker"><div class="user-location-dot"></div></div>'
-    : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="34" height="46" style="filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.3));">
+    : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="34" height="46" style="filter: drop-shadow(0px 3px 5px rgba(0,0,0,0.22));">
         <path d="M12 0C5.373 0 0 5.373 0 12c0 9.07 10.667 21.6 11.23 22.251a1 1 0 0 0 1.54 0C13.333 33.6 24 21.07 24 12c0-6.627-5.373-12-12-12z" fill="${color}" stroke="white" stroke-width="1.5"/>
         ${innerContent}
       </svg>`;
@@ -718,33 +716,6 @@ const formatTime = (seconds) => {
   return `${hours} ч ${mins} мин`;
 };
 
-const StatTile = ({ label, value, tone = 'blue' }) => {
-  const tones = {
-    blue: 'bg-blue-50 text-blue-700 border-blue-100 dark:bg-blue-900 dark:text-blue-300 dark:border-blue-800',
-    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-100 dark:bg-emerald-900 dark:text-emerald-300 dark:border-emerald-800',
-    amber: 'bg-amber-50 text-amber-700 border-amber-100 dark:bg-amber-900 dark:text-amber-300 dark:border-amber-800',
-    slate: 'bg-slate-50 text-slate-700 border-slate-100 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-600',
-  };
-
-  return (
-    <div className={`rounded-xl border px-2.5 py-2 ${tones[tone]}`}>
-      <div className="text-[10px] uppercase tracking-[0.16em] opacity-70">{label}</div>
-      <div className="mt-0.5 text-base font-extrabold leading-none">{value}</div>
-    </div>
-  );
-};
-
-const ToggleChip = ({ active, onClick, children, title }) => (
-  <button
-    type="button"
-    title={title}
-    onClick={onClick}
-    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-all ${active ? 'bg-blue-600 text-white shadow-md shadow-blue-200 dark:bg-blue-700 dark:text-blue-50 dark:shadow-blue-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600'}`}
-  >
-    {children}
-  </button>
-);
-
 export default function App() {
   const [userLocation, setUserLocation] = useState(defaultLocation);
   const [routeTargets, setRouteTargets] = useState([]);
@@ -782,12 +753,9 @@ export default function App() {
   const [favorites, setFavorites] = useLocalStorageState(FAVORITES_STORAGE_KEY, [], isStringIdArray);
   const [now, setNow] = useState(() => new Date());
   const [isLocationReady, setIsLocationReady] = useState(!hasGeolocationSupport);
-  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(true);
-  const [isFiltersCollapsed, setIsFiltersCollapsed] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
-  const [activeFilterTab, setActiveFilterTab] = useState('facility');
   const [mobileSheetDragOffset, setMobileSheetDragOffset] = useState(0);
   const [isDarkMode, setIsDarkMode] = useLocalStorageState(DARK_MODE_STORAGE_KEY, false, isBoolean);
   const { toast, showToast, dismiss: dismissToast } = useToast();
@@ -932,10 +900,8 @@ export default function App() {
       setSearchQuery(result.searchQuery);
     } else if (result.specialty) {
       setSearchQuery(result.specialty);
-      setActiveFilterTab('specialist');
     } else if (result.service) {
       setSearchQuery(result.service);
-      setActiveFilterTab('services');
     }
 
     // === ПОСТРОИТЬ МАРШРУТ ===
@@ -970,15 +936,6 @@ export default function App() {
 
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   const [isTablet, setIsTablet] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 768 && window.innerWidth <= 1024);
-
-  const quickFilterTags = [
-    { label: '🩺 Терапевт', value: 'Терапевт', icon: '🩺' },
-    { label: '❤️ Кардиолог', value: 'Кардиолог', icon: '❤️' },
-    { label: '👃 ЛОР', value: 'ЛОР', icon: '👃' },
-    { label: '👁️ Офтальмолог', value: 'Офтальмолог', icon: '👁️' },
-    { label: '🦷 Стоматолог', value: 'Стоматолог', icon: '🦷' },
-    { label: '🧠 Невролог', value: 'Невролог', icon: '🧠' },
-  ];
 
   const sidebarRef = useRef(null);
   const mobileSheetTouchStartYRef = useRef(null);
@@ -1285,7 +1242,6 @@ export default function App() {
     () => uniqueSorted(sourceFacilities.map((doc) => resolveDoctorProfile(doc))),
     [sourceFacilities],
   );
-  const ownerships = useMemo(() => uniqueSorted(sourceFacilities.map((doc) => doc.ownership)), [sourceFacilities]);
   const facilityTypes = useMemo(
     () => uniqueSorted(sourceFacilities.map((doc) => resolveFacilityType(doc))),
     [sourceFacilities],
@@ -1606,31 +1562,9 @@ export default function App() {
   ]);
 
   const favoritesCount = enrichedDoctors.filter((doc) => doc.isFavorite).length;
-  const openCount = enrichedDoctors.filter((doc) => doc.openNow).length;
   // Сколько записей фильтр «Открытые сейчас» прячет не потому, что они закрыты,
   // а потому, что графика нет в данных. Молча терять половину базы нечестно.
   const unknownScheduleCount = enrichedDoctors.filter((doc) => doc.openState === OPEN_STATE.UNKNOWN).length;
-  const ratedDoctors = enrichedDoctors.filter((doc) => doc.rating > 0);
-  const averageRating = ratedDoctors.length
-    ? (ratedDoctors.reduce((sum, doc) => sum + doc.rating, 0) / ratedDoctors.length).toFixed(1)
-    : '—';
-  const currentDateTimeLabel = useMemo(
-    () =>
-      new Intl.DateTimeFormat('ru-RU', {
-        weekday: 'short',
-        day: 'numeric',
-        month: 'short',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-        .format(now)
-        .replace(',', '')
-        .replace('.', ''),
-    [now],
-  );
-
-
-
   const nearestOpenDoctor = useMemo(() => {
     const byDistance = [...enrichedDoctors].sort((a, b) => (a.distanceKm || Infinity) - (b.distanceKm || Infinity));
     return byDistance.find((doc) => doc.openNow) || byDistance[0] || null;
@@ -1693,10 +1627,6 @@ export default function App() {
   const toggleFavorite = useCallback((id) => {
     setFavorites((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   }, [setFavorites]);
-
-  const toggleService = (service) => {
-    setSelectedServices((current) => (current.includes(service) ? current.filter((item) => item !== service) : [...current, service]));
-  };
 
   const handleRouteClick = useCallback((doc) => {
     if (!activeOrigin) {
@@ -1808,78 +1738,188 @@ export default function App() {
     setRouteData(null);
   }, []);
 
-  const markerNodes = useMemo(
-    () =>
-      sortedDoctors.map((doc) => {
-        // Когда маршрут активен — показываем ТОЛЬКО точки маршрута
-        const hasActiveRoute = routeTargets.length > 0;
-        const routeIndex = routeTargets.findIndex(t => t.id === doc.id);
-        const isRouteTarget = routeIndex !== -1;
+  const markerNodes = useMemo(() => {
+    // Группируем врачей и клиники по координатам, чтобы избежать наложения
+    // десятков одинаковых маркеров друг на друга (что вызывало черный ореол из теней)
+    const groupsMap = new Map();
 
-        // Если пользователь нажал "Начать маршрут" — скрываем все остальные маркеры
-        if (isRouteStarted && !isRouteTarget) {
-          return null;
-        }
+    sortedDoctors.forEach((doc) => {
+      const routeIndex = routeTargets.findIndex((t) => t.id === doc.id);
+      const isRouteTarget = routeIndex !== -1;
 
-        // Если маршрут не начат (или вообще не строится) — применяем обычный фильтр по типу карточки
-        if (!isRouteStarted && cardDisplayMode !== 'all' && doc.entityKind !== cardDisplayMode) {
-          return null;
-        }
-        const isGovernment = /государ/i.test(String(doc.ownership || ''));
-        const ownershipIcon = isGovernment ? blueArrowIcon : violetArrowIcon;
+      // Если пользователь нажал "Начать маршрут" — скрываем все остальные маркеры
+      if (isRouteStarted && !isRouteTarget) {
+        return;
+      }
 
-        // Генерируем иконку с номером, если это точка маршрута
-        const icon = isRouteTarget
-          ? createBeautifulArrow('#ef4444', false, (routeIndex + 1).toString())
-          : doc.isFavorite ? amberArrowIcon : ownershipIcon;
+      // Если маршрут не начат — применяем обычный фильтр по типу карточки
+      if (!isRouteStarted && cardDisplayMode !== 'all' && doc.entityKind !== cardDisplayMode) {
+        return;
+      }
 
-        const popupRouteButtonClasses = isRouteTarget
-          ? 'mt-3 w-full text-sm font-medium py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all bg-red-50 text-red-600 border border-red-200'
-          : 'mt-3 w-full text-sm font-medium py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all bg-blue-50 text-blue-600 border border-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:border-blue-800';
+      const key = `${Number(doc.lat).toFixed(5)},${Number(doc.lng).toFixed(5)}`;
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          lat: doc.lat,
+          lng: doc.lng,
+          items: [],
+        });
+      }
+      groupsMap.get(key).items.push({ ...doc, routeIndex, isRouteTarget });
+    });
 
-        return (
-          <Marker key={doc.id} position={[doc.lat, doc.lng]} icon={icon}>
-            <Popup>
-              <div className="min-w-[220px] pb-1 dark:text-white">
-                <strong className="mb-1 block text-xl leading-tight text-blue-600 dark:text-blue-400">{doc.clinic}</strong>
-                <span className="text-sm font-medium text-slate-600 dark:text-slate-400">{doc.specialty}</span>
-                <br />
-                <span className="text-base text-slate-800 dark:text-white">{doc.name}</span>
-                <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                  <span className={`rounded-full px-2 py-1 font-semibold ${doc.openState === OPEN_STATE.OPEN ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'}`}>
-                    {doc.openState === OPEN_STATE.OPEN
-                      ? 'Открыто'
-                      : doc.openState === OPEN_STATE.CLOSED
-                        ? 'Закрыто'
-                        : 'График не указан'}
-                  </span>
-                  <span className={`rounded-full px-2 py-1 font-semibold ${isGovernment ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200' : 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200'}`}>
-                    {doc.ownership || 'Не указано'}
-                  </span>
-                  <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{doc.district}</span>
+    return Array.from(groupsMap.values()).map((group) => {
+      const { lat, lng, items } = group;
+      // Если среди специалистов точки есть точка маршрута — маркер должен быть красным маршрутным
+      const targetItem = items.find((it) => it.isRouteTarget);
+      const isRouteTarget = Boolean(targetItem);
+      const routeIndex = targetItem ? targetItem.routeIndex : -1;
+
+      const hasFavorite = items.some((it) => it.isFavorite);
+      const isGovernment = items.some((it) => /государ/i.test(String(it.ownership || '')));
+      const ownershipIcon = isGovernment ? blueArrowIcon : violetArrowIcon;
+
+      // Приоритет иконки: Маршрут -> Избранное -> Государственная/Частная
+      const icon = isRouteTarget
+        ? createBeautifulArrow('#ef4444', false, (routeIndex + 1).toString())
+        : hasFavorite
+          ? amberArrowIcon
+          : ownershipIcon;
+
+      const primary = targetItem || items[0];
+      const isSingle = items.length === 1;
+
+      const popupRouteButtonClasses = (isTarget) =>
+        isTarget
+          ? 'mt-2 w-full text-xs font-medium py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all bg-red-50 text-red-600 border border-red-200'
+          : 'mt-2 w-full text-xs font-medium py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition-all bg-blue-50 text-blue-600 border border-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:border-blue-800';
+
+      return (
+        <Marker key={`group-${lat}-${lng}`} position={[lat, lng]} icon={icon}>
+          <Popup>
+            <div className="min-w-[240px] max-w-[300px] pb-1 dark:text-white">
+              <strong className="mb-1 block text-lg font-bold leading-tight text-blue-600 dark:text-blue-400">
+                {primary.clinic || primary.name}
+              </strong>
+              {primary.address && (
+                <div className="mb-2 text-xs text-slate-500 dark:text-slate-400">{primary.address}</div>
+              )}
+
+              {isSingle ? (
+                <div>
+                  <span className="text-sm font-medium text-slate-600 dark:text-slate-400">{primary.specialty}</span>
+                  <br />
+                  <span className="text-base text-slate-800 dark:text-white">{primary.name}</span>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                    <span
+                      className={`rounded-full px-2 py-1 font-semibold ${
+                        primary.openState === OPEN_STATE.OPEN
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-100'
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {primary.openState === OPEN_STATE.OPEN
+                        ? 'Открыто'
+                        : primary.openState === OPEN_STATE.CLOSED
+                          ? 'Закрыто'
+                          : 'График не указан'}
+                    </span>
+                    <span
+                      className={`rounded-full px-2 py-1 font-semibold ${
+                        isGovernment
+                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200'
+                          : 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200'
+                      }`}
+                    >
+                      {primary.ownership || 'Не указано'}
+                    </span>
+                    {primary.district && (
+                      <span className="rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                        {primary.district}
+                      </span>
+                    )}
+                  </div>
+                  {primary.todayHours && (
+                    <div className="mt-2 text-xs text-slate-600 dark:text-slate-400">Сегодня: {primary.todayHours}</div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => (primary.isRouteTarget ? removeFromRoute(primary.id) : handleRouteClick(primary))}
+                    className={popupRouteButtonClasses(primary.isRouteTarget)}
+                  >
+                    {primary.isRouteTarget ? <XCircle size={15} /> : <Navigation size={15} />}
+                    {primary.isRouteTarget ? 'Убрать из маршрута' : 'Добавить в маршрут'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleFavorite(primary.id)}
+                    className={`mt-1.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${
+                      primary.isFavorite
+                        ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900 dark:text-amber-200'
+                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400'
+                    }`}
+                  >
+                    {primary.isFavorite ? <Heart size={14} fill="currentColor" /> : <HeartOff size={14} />}{' '}
+                    {primary.isFavorite ? 'В избранном' : 'В избранное'}
+                  </button>
                 </div>
-                <div className="mt-3 text-sm text-slate-600 dark:text-slate-400">Сегодня: {doc.todayHours}</div>
-                <button
-                  type="button"
-                  onClick={() => (isRouteTarget ? removeFromRoute(doc.id) : handleRouteClick(doc))}
-                  className={popupRouteButtonClasses}
-                >
-                  {isRouteTarget ? <XCircle size={16} /> : <Navigation size={16} />} {isRouteTarget ? 'Убрать из маршрута' : 'Добавить в маршрут'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => toggleFavorite(doc.id)}
-                  className={`mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-all ${doc.isFavorite ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900 dark:text-amber-200' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400'}`}
-                >
-                  {doc.isFavorite ? <Heart size={16} fill="currentColor" /> : <HeartOff size={16} />} {doc.isFavorite ? 'В избранном' : 'В избранное'}
-                </button>
-              </div>
-            </Popup>
-          </Marker>
-        );
-      }),
-    [sortedDoctors, routeTargets, cardDisplayMode, isRouteStarted, removeFromRoute, handleRouteClick, toggleFavorite],
-  );
+              ) : (
+                <div>
+                  <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    <span>Специалисты в учреждении:</span>
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                      {items.length}
+                    </span>
+                  </div>
+                  <div className="max-h-52 space-y-2 overflow-y-auto pr-1 scrollbar-thin">
+                    {items.map((doc) => (
+                      <div
+                        key={doc.id}
+                        className={`rounded-xl border p-2 text-xs transition-colors ${
+                          doc.isRouteTarget
+                            ? 'border-red-200 bg-red-50/50 dark:border-red-900/50 dark:bg-red-950/20'
+                            : 'border-slate-100 bg-slate-50 dark:border-slate-700 dark:bg-slate-800'
+                        }`}
+                      >
+                        <div className="font-bold text-slate-800 dark:text-white">{doc.name}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">{doc.specialty}</div>
+                        <div className="mt-1.5 flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => (doc.isRouteTarget ? removeFromRoute(doc.id) : handleRouteClick(doc))}
+                            className={`flex flex-1 items-center justify-center gap-1 rounded-lg py-1 text-[11px] font-medium transition-all ${
+                              doc.isRouteTarget
+                                ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-200'
+                                : 'bg-blue-600 text-white hover:bg-blue-700'
+                            }`}
+                          >
+                            {doc.isRouteTarget ? <XCircle size={12} /> : <Navigation size={12} />}
+                            {doc.isRouteTarget ? 'Убрать' : 'В маршрут'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleFavorite(doc.id)}
+                            className={`flex h-7 w-7 items-center justify-center rounded-lg border text-slate-500 transition-colors ${
+                              doc.isFavorite
+                                ? 'border-amber-200 bg-amber-50 text-amber-600'
+                                : 'border-slate-200 bg-white hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-700'
+                            }`}
+                            title={doc.isFavorite ? 'В избранном' : 'В избранное'}
+                          >
+                            <Heart size={13} fill={doc.isFavorite ? 'currentColor' : 'none'} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Popup>
+        </Marker>
+      );
+    });
+  }, [sortedDoctors, routeTargets, cardDisplayMode, isRouteStarted, removeFromRoute, handleRouteClick, toggleFavorite]);
 
   const resetToGPS = () => {
     setIsManualOrigin(false);
@@ -2223,16 +2263,7 @@ export default function App() {
           </button>
         </div>
 
-        {externalMapUrl && (
-          <a
-            href={externalMapUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-medium text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-700 dark:border-slate-600 dark:text-slate-400 dark:hover:text-slate-200"
-          >
-            <ExternalLink size={15} aria-hidden="true" /> {externalMapLabel()}
-          </a>
-        )}
+
       </div>
     );
   };
@@ -2248,11 +2279,35 @@ export default function App() {
     );
   }
 
-  const facilityFilterCount = (cardDisplayMode !== 'all' ? 1 : 0) + (selectedFacilityType !== 'all' ? 1 : 0) + (selectedOwnership !== 'all' ? 1 : 0) + (selectedClinic !== 'all' ? 1 : 0);
-  const specialistFilterCount = (selectedDoctorProfile !== 'all' ? 1 : 0) + (minRating > 0 ? 1 : 0) + (minExperience > 0 ? 1 : 0);
-  const locationFilterCount = (selectedDistrict !== 'all' ? 1 : 0) + (maxDistance > 0 ? 1 : 0);
-  const optionsFilterCount = [weekendOnly, eveningOnly, onlineOnly, wheelchairOnly, childrenOnly].filter(Boolean).length;
-  const servicesFilterCount = selectedServices.length;
+  const filters = {
+    searchQuery, cardDisplayMode, doctorProfile: selectedDoctorProfile,
+    facilityType: selectedFacilityType, ownership: selectedOwnership,
+    clinic: selectedClinic, district: selectedDistrict, services: selectedServices,
+    childrenOnly, openOnly, favoritesOnly, weekendOnly, eveningOnly,
+    onlineOnly, wheelchairOnly, minRating, minExperience, maxDistance,
+  };
+  const filterSetters = {
+    searchQuery: setSearchQuery, doctorProfile: setSelectedDoctorProfile,
+    facilityType: setSelectedFacilityType, ownership: setSelectedOwnership,
+    clinic: setSelectedClinic, district: setSelectedDistrict, services: setSelectedServices,
+    childrenOnly: setChildrenOnly, openOnly: setOpenOnly, favoritesOnly: setFavoritesOnly,
+    weekendOnly: setWeekendOnly, eveningOnly: setEveningOnly,
+    onlineOnly: setOnlineOnly, wheelchairOnly: setWheelchairOnly,
+    minRating: setMinRating, minExperience: setMinExperience, maxDistance: setMaxDistance,
+  };
+  const handleFilterChange = (field, value) => {
+    if (field === 'cardDisplayMode') {
+      setCardDisplayMode(value);
+      // При смене раздела убираем условия, относящиеся только к другому типу.
+      if (value === 'facility') setSelectedDoctorProfile('all');
+      if (value !== 'facility') setSelectedFacilityType('all');
+      if (value === 'doctor') {
+        setOpenOnly(false);
+      }
+      return;
+    }
+    filterSetters[field]?.(value);
+  };
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-slate-100 font-sans dark:bg-slate-900">
@@ -2265,26 +2320,29 @@ export default function App() {
               onClick={() => setIsMobileFiltersOpen(false)}
             />
           )}
+          {!isMobile && (
+            <button
+              type="button"
+              onClick={() => setIsSidebarCollapsed((current) => !current)}
+              aria-label={isSidebarCollapsed ? 'Показать панель поиска' : 'Скрыть панель поиска'}
+              aria-expanded={!isSidebarCollapsed}
+              className="absolute top-1/2 z-[1010] flex h-12 w-5 -translate-y-1/2 items-center justify-center rounded-r-lg border border-l-0 border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300"
+              style={{ left: isSidebarCollapsed ? 0 : (isTablet ? 340 : sidebarWidth) }}
+            >
+              {isSidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            </button>
+          )}
           <aside
             ref={sidebarRef}
-            className={`${isMobile ? 'mobile-bottom-sheet' : ''} z-[1000] relative flex shrink-0 flex-col bg-white shadow-2xl overflow-hidden dark:bg-slate-800 transition-all duration-300 ease-in-out ${isSidebarCollapsed && !isMobile ? 'border-r-0' : ''} ${isMobile ? 'fixed inset-x-0 bottom-0 max-h-[85vh] w-full rounded-t-3xl' : ''}`}
+            aria-label="Поиск врачей и учреждений"
+            inert={isSidebarCollapsed && !isMobile}
+            className={`search-sidebar ${isMobile ? 'mobile-bottom-sheet' : ''} z-[1000] relative flex shrink-0 flex-col bg-white shadow-2xl overflow-hidden dark:bg-slate-800 transition-all duration-300 ease-in-out ${isSidebarCollapsed && !isMobile ? 'border-r-0' : ''} ${isMobile ? 'fixed inset-x-0 bottom-0 max-h-[85vh] w-full rounded-t-3xl' : ''}`}
             style={
               isMobile
                 ? { transform: `translateY(${mobileSheetDragOffset}px)` }
                 : { width: `${isTablet ? 340 : sidebarWidth}px`, marginLeft: isSidebarCollapsed ? `-${isTablet ? 340 : sidebarWidth}px` : '0px' }
             }
           >
-            {!isMobile && (
-              <button
-                type="button"
-                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-                aria-label={isSidebarCollapsed ? 'Показать панель поиска' : 'Скрыть панель поиска'}
-                aria-expanded={!isSidebarCollapsed}
-                className="absolute -right-5 top-1/2 z-[1010] flex h-16 w-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-r-xl border border-l-0 border-slate-200 bg-white shadow-[2px_0_8px_rgba(0,0,0,0.1)] transition-colors hover:bg-slate-50 hover:text-blue-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400 dark:hover:text-blue-400"
-              >
-                {isSidebarCollapsed ? <ChevronRight size={18} strokeWidth={3} /> : <ChevronLeft size={18} strokeWidth={3} />}
-              </button>
-            )}
             {isMobile && (
               <div
                 className="flex cursor-grab justify-center py-3 active:cursor-grabbing select-none"
@@ -2296,367 +2354,128 @@ export default function App() {
                 <div className="h-1.5 w-14 rounded-full bg-slate-300 dark:bg-slate-600" />
               </div>
             )}
-            <div className="border-b border-slate-200 p-4 dark:border-slate-700">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="mb-1 inline-flex items-center gap-2 rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                    <Sparkles size={14} /> Казань
+            <header className="shrink-0 px-4 pb-3 pt-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <MapPin size={24} className="shrink-0 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+                  <div>
+                    <h1 className="text-[23px] font-extrabold leading-none tracking-tight text-blue-600 dark:text-blue-400">МедКарта</h1>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Казань</p>
                   </div>
-                  <h1 className={`flex items-center gap-2 font-black leading-none text-blue-600 dark:text-blue-400 ${isMobile ? 'text-[26px]' : isTablet ? 'text-[30px]' : 'text-[38px]'}`}>
-                    <MapPin className="text-blue-500 dark:text-blue-400" size={isMobile ? 22 : 28} /> МедКарта
-                  </h1>
-                  {!isMobile && <p className="mt-1 max-w-sm text-[13px] leading-5 text-slate-500 dark:text-slate-400">Клиники, врачи и маршруты по Казани.</p>}
                 </div>
-                <div className="flex flex-col items-end gap-1 text-right text-xs text-slate-500 dark:text-slate-400">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] dark:bg-slate-700 dark:text-slate-300">Сегодня</span>
-                    <button
-                      type="button"
-                      onClick={() => setIsDarkMode((current) => !current)}
-                      title={isDarkMode ? 'Светлая тема' : 'Тёмная тема'}
-                      aria-label={isDarkMode ? 'Включить светлую тему' : 'Включить тёмную тему'}
-                      aria-pressed={isDarkMode}
-                      className="rounded-full border border-slate-200 bg-white p-1.5 text-slate-600 transition-all hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400"
-                    >
-                      {isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="sidebar-icon-button relative"
+                    onClick={() => setFavoritesOnly((current) => !current)}
+                    aria-label={favoritesOnly ? 'Показать все вместо избранного' : 'Показать избранное'}
+                    aria-pressed={favoritesOnly}
+                    title={`Избранное: ${favoritesCount}`}
+                  >
+                    <Heart size={19} fill={favoritesOnly ? 'currentColor' : 'none'} aria-hidden="true" />
+                    {favoritesCount > 0 && <span className="absolute -right-0.5 -top-0.5 rounded-full bg-blue-600 px-1 text-[10px] leading-4 text-white">{favoritesCount}</span>}
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-icon-button"
+                    onClick={() => setIsDarkMode((current) => !current)}
+                    aria-label={isDarkMode ? 'Включить светлую тему' : 'Включить тёмную тему'}
+                    aria-pressed={isDarkMode}
+                    title={isDarkMode ? 'Светлая тема' : 'Тёмная тема'}
+                  >
+                    {isDarkMode ? <Sun size={19} /> : <Moon size={19} />}
+                  </button>
+                  {isMobile && (
+                    <button type="button" className="sidebar-icon-button" aria-label="Закрыть поиск" onClick={() => setIsMobileFiltersOpen(false)}>
+                      <X size={20} aria-hidden="true" />
                     </button>
-                  </div>
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300 mt-1">
-                    <Clock size={13} /> {currentDateTimeLabel}
-                  </span>
+                  )}
                 </div>
               </div>
-
-              {locationError && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900 dark:text-amber-300">Геолокация недоступна. Показан центр Казани.</p>}
-
-              <div className="relative mt-3 flex items-center gap-2">
-                <div className="relative flex-1">
-                  <label className="sr-only" htmlFor="facility-search">
-                    Поиск по врачу, клинике, адресу или услуге
-                  </label>
-                  <Search className="absolute left-3 top-2.5 text-slate-400" size={18} aria-hidden="true" />
-                  <input
-                    id="facility-search"
-                    type="search"
-                    autoComplete="off"
-                    maxLength={100}
-                    placeholder="Поиск по врачу, клинике, адресу, услуге"
-                    value={searchQuery}
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    onFocus={() => setIsSearchFocused(true)}
-                    onBlur={() => setIsSearchFocused(false)}
-                    role="combobox"
-                    aria-expanded={isSearchFocused && searchSuggestions.length > 0}
-                    aria-controls="search-suggestions"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-100 py-2.5 pl-10 pr-4 text-sm transition-all focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-700 dark:text-white"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={clearFilters}
-                  title="Сбросить все фильтры"
-                  aria-label="Сбросить все фильтры"
-                  className="flex h-[42px] w-[42px] items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition-colors hover:bg-slate-50 hover:text-red-500 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:text-red-400"
-                >
-                  <RefreshCcw size={18} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsFiltersCollapsed(!isFiltersCollapsed)}
-                  aria-expanded={!isFiltersCollapsed}
-                  aria-label={isFiltersCollapsed ? 'Показать фильтры' : 'Скрыть фильтры'}
-                  title={isFiltersCollapsed ? "Показать фильтры" : "Скрыть фильтры"}
-                  className={`flex h-[42px] w-[42px] items-center justify-center rounded-xl border transition-colors ${!isFiltersCollapsed
-                      ? 'border-blue-200 bg-blue-50 text-blue-600 dark:border-blue-800 dark:bg-blue-900/50 dark:text-blue-400'
-                      : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-blue-600 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:text-blue-400'
-                    }`}
-                >
-                  <SlidersHorizontal size={18} />
-                </button>
-
+              <div className="relative mt-3">
+                <label className="sr-only" htmlFor="facility-search">Поиск по врачу, клинике, адресу или услуге</label>
+                <Search className="pointer-events-none absolute left-3 top-3.5 text-slate-500 dark:text-slate-400" size={17} aria-hidden="true" />
+                <input
+                  id="facility-search"
+                  type="search"
+                  autoComplete="off"
+                  maxLength={100}
+                  placeholder="Врач, клиника или адрес"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onFocus={() => setIsSearchFocused(true)}
+                  onBlur={() => setIsSearchFocused(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') setIsSearchFocused(false);
+                  }}
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded={isSearchFocused && searchSuggestions.length > 0}
+                  aria-controls="search-suggestions"
+                  className="sidebar-search-input"
+                />
+                {searchQuery && (
+                  <button type="button" className="sidebar-icon-button absolute right-1 top-1 !h-9 !w-8" aria-label="Очистить поиск" onClick={() => setSearchQuery('')}>
+                    <X size={16} aria-hidden="true" />
+                  </button>
+                )}
                 {isSearchFocused && searchSuggestions.length > 0 && (
-                  <div
-                    id="search-suggestions"
-                    role="listbox"
-                    aria-label="Варианты поиска"
-                    className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-600 dark:bg-slate-800"
-                  >
+                  <div id="search-suggestions" role="listbox" aria-label="Варианты поиска" className="absolute inset-x-0 top-full z-20 mt-1 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-600 dark:bg-slate-800">
                     {searchSuggestions.map((item) => (
                       <button
                         key={`${item.type}-${item.key}`}
                         role="option"
                         aria-selected="false"
                         type="button"
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          handleSearchSuggestionSelect(item.value);
-                        }}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => handleSearchSuggestionSelect(item.value)}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
                       >
                         <span className="truncate">{item.value}</span>
-                        <span className="ml-3 shrink-0 text-[11px] uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">{item.type}</span>
+                        <span className="ml-3 shrink-0 text-[11px] text-slate-500 dark:text-slate-400">{item.type}</span>
                       </button>
                     ))}
                   </div>
                 )}
               </div>
+              {locationError && <p className="mt-2 text-[11px] leading-4 text-slate-500 dark:text-slate-400">Геолокация недоступна · поиск от центра Казани</p>}
+            </header>
 
-              {/* Quick filter chips */}
-              <div className="mt-3 flex flex-wrap gap-2">
-                {quickFilterTags.map((tag) => (
-                  <button
-                    key={tag.value}
-                    type="button"
-                    onClick={() => setSearchQuery(tag.value)}
-                    title={`Поиск: ${tag.value}`}
-                    className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-all hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900 dark:text-blue-300"
-                  >
-                    {tag.label}
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+              <SearchFilters
+                filters={filters}
+                options={{ doctorProfiles, facilityTypes, clinics, services: allServices }}
+                onChange={handleFilterChange}
+                onReset={clearFilters}
+                onNearest={handleGoToNearest}
+              />
+              <div className="sidebar-results mt-1">
+                <h2 role="status" aria-live="polite">Найдено {sortedDoctors.length.toLocaleString('ru-RU')}</h2>
+                <div className="sidebar-results-actions">
+                  <label className="filter-select-wrap">
+                    <span className="sr-only">Сортировка результатов</span>
+                    <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+                      <option value="recommendation">По рекомендации</option>
+                      <option value="distance">По расстоянию</option>
+                      <option value="schedule">Сначала открытые</option>
+                      <option value="name">По имени</option>
+                      <option value="clinic">По клинике</option>
+                      {sortBy === 'rating' && <option value="rating">По рейтингу</option>}
+                      {sortBy === 'experience' && <option value="experience">По стажу</option>}
+                    </select>
+                    <ChevronDown size={13} aria-hidden="true" />
+                  </label>
+                  <button type="button" className="sidebar-icon-button" onClick={handleShare} aria-label="Поделиться подборкой" title="Поделиться подборкой">
+                    <Share2 size={16} aria-hidden="true" />
                   </button>
-                ))}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsHeaderCollapsed((current) => !current)}
-                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300"
-              >
-                {isHeaderCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                {isHeaderCollapsed ? 'Показать быстрые блоки' : 'Скрыть быстрые блоки'}
-              </button>
-
-              <div className={`quick-blocks-collapse ${isHeaderCollapsed ? 'is-collapsed' : ''}`}>
-                <div className="quick-blocks-collapse__inner">
-                  <div className="mt-3 grid grid-cols-3 gap-2">
-                    <StatTile label="Показано" value={sortedDoctors.length} tone="blue" />
-                    <StatTile label="Открыто" value={openCount} tone="emerald" />
-                    <StatTile label="Избранное" value={favoritesCount} tone="amber" />
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setOpenOnly((current) => !current)}
-                      className={`inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-1.5 text-[13px] font-semibold transition-all ${openOnly ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900 dark:text-emerald-100' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:bg-slate-600'}`}
-                    >
-                      <ShieldCheck size={16} /> Открытые сейчас
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleGoToNearest}
-                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-[13px] font-semibold text-blue-700 transition-all hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800"
-                    >
-                      <Target size={16} /> Ближайшая открытая
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFavoritesOnly((current) => !current)}
-                      className={`inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-1.5 text-[13px] font-semibold transition-all ${favoritesOnly ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-900 dark:text-amber-100' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-400 dark:hover:bg-slate-600'}`}
-                    >
-                      {favoritesOnly ? <Heart size={16} fill="currentColor" /> : <HeartOff size={16} />}
-                      Избранные
-                    </button>
-                  </div>
                 </div>
               </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-3">
-              <div className="space-y-4">
-                <div className={`filters-collapse ${isFiltersCollapsed ? 'is-collapsed' : ''}`}>
-                  <div className="filters-collapse__inner">
-                    <section className="rounded-3xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
-                      <div className="mb-3 flex items-center justify-between gap-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                        <span className="inline-flex items-center gap-2">
-                          <SlidersHorizontal size={16} /> Фильтры и сортировка
-                        </span>
-                      </div>
-                      <div className="pt-3">
-                        <div className="flex w-full gap-2 overflow-x-auto pb-2 scrollbar-none" style={{ WebkitOverflowScrolling: 'touch' }}>
-                          <button onClick={() => setActiveFilterTab('facility')} className={`relative whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeFilterTab === 'facility' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-700 dark:text-slate-300'}`}>
-                            🏥 Учреждение
-                            {facilityFilterCount > 0 && <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">{facilityFilterCount}</span>}
-                          </button>
-                          <button onClick={() => setActiveFilterTab('specialist')} className={`relative whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeFilterTab === 'specialist' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-700 dark:text-slate-300'}`}>
-                            👨‍⚕️ Врач
-                            {specialistFilterCount > 0 && <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">{specialistFilterCount}</span>}
-                          </button>
-                          <button onClick={() => setActiveFilterTab('location')} className={`relative whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeFilterTab === 'location' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-700 dark:text-slate-300'}`}>
-                            📍 Локация
-                            {locationFilterCount > 0 && <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">{locationFilterCount}</span>}
-                          </button>
-                          <button onClick={() => setActiveFilterTab('options')} className={`relative whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeFilterTab === 'options' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-700 dark:text-slate-300'}`}>
-                            ⚡ Опции
-                            {optionsFilterCount > 0 && <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">{optionsFilterCount}</span>}
-                          </button>
-                          <button onClick={() => setActiveFilterTab('services')} className={`relative whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${activeFilterTab === 'services' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300' : 'bg-white text-slate-600 hover:bg-slate-100 dark:bg-slate-700 dark:text-slate-300'}`}>
-                            📋 Услуги
-                            {servicesFilterCount > 0 && <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">{servicesFilterCount}</span>}
-                          </button>
-                        </div>
-
-                        <div className="space-y-4 border-t border-slate-200 pt-4 dark:border-slate-700">
-                          <div>
-                            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Сортировка (активна всегда)</div>
-                            <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                              <option value="recommendation">По рекомендации</option>
-                              <option value="rating">По рейтингу</option>
-                              <option value="experience">По стажу</option>
-                              <option value="distance">По расстоянию</option>
-                              <option value="schedule">По ближайшему приёму</option>
-                              <option value="name">По имени врача</option>
-                              <option value="clinic">По клинике</option>
-                            </select>
-                          </div>
-
-                          <div>
-                            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Что ищем?</div>
-                            <div className="flex flex-wrap gap-2">
-                              <ToggleChip active={cardDisplayMode === 'all'} onClick={() => setCardDisplayMode('all')}>Всё вместе</ToggleChip>
-                              <ToggleChip active={cardDisplayMode === 'doctor'} onClick={() => setCardDisplayMode('doctor')}>Только врачи</ToggleChip>
-                              <ToggleChip active={cardDisplayMode === 'facility'} onClick={() => setCardDisplayMode('facility')}>Только учреждения</ToggleChip>
-                            </div>
-                          </div>
-
-                          {activeFilterTab === 'facility' && (
-                            <div className="space-y-4 card-fade-in">
-                              <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                  <div className="mb-2 flex h-9 items-end text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Тип учреждения</div>
-                                  <select value={selectedFacilityType} onChange={(e) => setSelectedFacilityType(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                                    <option value="all">Все</option>
-                                    {facilityTypes.map((type) => <option key={type} value={type}>{type}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <div className="mb-2 flex h-9 items-end text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Форма собственности</div>
-                                  <select value={selectedOwnership} onChange={(e) => setSelectedOwnership(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                                    <option value="all">Все</option>
-                                    {ownerships.map((ownership) => <option key={ownership} value={ownership}>{ownership}</option>)}
-                                  </select>
-                                </div>
-                              </div>
-                              <div>
-                                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Конкретная клиника</div>
-                                <select value={selectedClinic} onChange={(e) => setSelectedClinic(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                                  <option value="all">Любая</option>
-                                  {clinics.map((clinic) => <option key={clinic} value={clinic}>{clinic}</option>)}
-                                </select>
-                              </div>
-                            </div>
-                          )}
-
-                          {activeFilterTab === 'specialist' && (
-                            <div className="space-y-4 card-fade-in">
-                              <div>
-                                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Специальность врача</div>
-                                <select value={selectedDoctorProfile} onChange={(e) => setSelectedDoctorProfile(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                                  <option value="all">Любая</option>
-                                  {doctorProfiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
-                                </select>
-                              </div>
-                              <div className="grid grid-cols-2 gap-3">
-                                <label className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-600 dark:bg-slate-700">
-                                  <div className="mb-2 flex items-center justify-between text-sm font-semibold text-slate-700 dark:text-slate-200">
-                                    <span>Рейтинг от {minRating.toFixed(1)}</span>
-                                    <Star size={16} className="text-amber-500" fill="currentColor" />
-                                  </div>
-                                  <input type="range" min="0" max="5" step="0.1" value={minRating} onChange={(e) => setMinRating(Number(e.target.value))} className="w-full accent-blue-600" />
-                                </label>
-                                <label className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-600 dark:bg-slate-700">
-                                  <div className="mb-2 flex items-center justify-between text-sm font-semibold text-slate-700 dark:text-slate-200">
-                                    <span>Стаж от {minExperience} лет</span>
-                                    <Gauge size={16} className="text-blue-500" />
-                                  </div>
-                                  <input type="range" min="0" max="30" step="1" value={minExperience} onChange={(e) => setMinExperience(Number(e.target.value))} className="w-full accent-blue-600" />
-                                </label>
-                              </div>
-                            </div>
-                          )}
-
-                          {activeFilterTab === 'location' && (
-                            <div className="space-y-4 card-fade-in">
-                              <div>
-                                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Район города</div>
-                                <select value={selectedDistrict} onChange={(e) => setSelectedDistrict(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition-all focus:border-blue-400 dark:border-slate-600 dark:bg-slate-700 dark:text-white">
-                                  <option value="all">Любой</option>
-                                  {districts.map((district) => <option key={district} value={district}>{district}</option>)}
-                                </select>
-                              </div>
-                              <div className="rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-600 dark:bg-slate-700">
-                                <div className="mb-2 flex items-start justify-between gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                                  <span>Макс. расстояние от вас: {maxDistance === 0 ? 'Без ограничения' : `${maxDistance} км`}</span>
-                                  <MapPin size={16} className="shrink-0 text-emerald-500 mt-0.5" />
-                                </div>
-                                <input type="range" min="0" max="40" step="1" value={maxDistance} onChange={(e) => setMaxDistance(Number(e.target.value))} className="w-full accent-blue-600" />
-                              </div>
-                            </div>
-                          )}
-
-                          {activeFilterTab === 'options' && (
-                            <div className="card-fade-in">
-                              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Дополнительные опции</div>
-                              <div className="flex flex-col gap-2">
-                                <ToggleChip active={weekendOnly} onClick={() => setWeekendOnly((current) => !current)}>📅 Выходные дни</ToggleChip>
-                                <ToggleChip active={eveningOnly} onClick={() => setEveningOnly((current) => !current)}>🌙 Вечерний приём (после 18:00)</ToggleChip>
-                                <ToggleChip active={onlineOnly} onClick={() => setOnlineOnly((current) => !current)}>🌐 Доступна онлайн-запись</ToggleChip>
-                                <ToggleChip active={wheelchairOnly} onClick={() => setWheelchairOnly((current) => !current)}>♿ Доступно для инвалидов колясочников</ToggleChip>
-                                <ToggleChip active={childrenOnly} onClick={() => setChildrenOnly((current) => !current)}>🧸 Оказывают услуги детям</ToggleChip>
-                              </div>
-                            </div>
-                          )}
-
-                          {activeFilterTab === 'services' && (
-                            <div className="card-fade-in">
-                              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Фильтр по услугам</div>
-                              <div className="flex max-h-[300px] flex-wrap gap-2 overflow-y-auto pr-2 scrollbar-thin">
-                                {allServices.map((service) => (
-                                  <ToggleChip key={service} active={selectedServices.includes(service)} onClick={() => toggleService(service)}>
-                                    {service}
-                                  </ToggleChip>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </section>
-                  </div>
-                </div>
-
-                <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
-                  <div className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                    <Building2 size={16} /> Результаты
-                  </div>
-                  <div className="space-y-2 text-sm text-slate-500 dark:text-slate-400">
-                    <p>
-                      {sortedDoctors.length} карточек из {sourceFacilities.length}
-                    </p>
-                    <p>Открытых сейчас: {openCount}</p>
-                    <p>Средний рейтинг по базе: {averageRating}</p>
-                  </div>
-
-                  {openOnly && unknownScheduleCount > 0 && (
-                    <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                      Ещё {unknownScheduleCount} объектов скрыто: у них не указан график работы, поэтому
-                      определить, открыты ли они сейчас, невозможно. Снимите фильтр «Открытые сейчас»,
-                      чтобы их увидеть.
-                    </p>
-                  )}
-
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={handleShare}
-                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600"
-                    >
-                      <Share2 size={14} aria-hidden="true" /> Поделиться подборкой
-                    </button>
-                  </div>
-                </section>
-              </div>
-
-              <div className="mt-4 space-y-4">
+              {openOnly && unknownScheduleCount > 0 && (
+                <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+                  Объекты без расписания скрыты. <button type="button" className="font-semibold underline underline-offset-2" onClick={() => setOpenOnly(false)}>Показать все</button>
+                </p>
+              )}
+              <div className="space-y-3">
                 {sortedDoctors.length === 0 ? (
                   <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400">
                     {/* Пустое состояние теперь называет конкретную причину:
@@ -2750,15 +2569,7 @@ export default function App() {
                   </>
                 )}
               </div>
-            </div>
-
-            <div className="mt-8 border-t border-slate-100 px-4 py-6 text-center dark:border-slate-700" style={isMobile ? { paddingBottom: 'max(24px, env(safe-area-inset-bottom))' } : undefined}>
-              <div className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
-                © 2026 MedКарта Казань
-              </div>
-              <div className="mt-1 text-[10px] text-slate-300 dark:text-slate-600">
-                Все права защищены
-              </div>
+              <footer className="py-5 text-center text-[11px] text-slate-400 dark:text-slate-500">© 2026 МедКарта Казань</footer>
             </div>
           </aside>
         </>
@@ -2875,16 +2686,7 @@ export default function App() {
                     Редактировать маршрут
                   </button>
                 )}
-                {externalRouteUrl && (
-                  <a
-                    href={externalRouteUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white py-3 font-semibold text-slate-600 transition-colors active:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                  >
-                    <ExternalLink size={16} aria-hidden="true" /> {externalMapLabel()}
-                  </a>
-                )}
+
                 <button type="button" onClick={clearRoute} className="w-full rounded-xl border border-slate-200 bg-white py-3 font-semibold text-red-500 transition-colors active:bg-red-50 dark:border-slate-600 dark:bg-slate-800 dark:active:bg-red-900/30">
                   Очистить маршрут
                 </button>
@@ -3062,16 +2864,7 @@ export default function App() {
                   Редактировать маршрут
                 </button>
               )}
-              {externalRouteUrl && (
-                <a
-                  href={externalRouteUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white py-3 font-semibold text-slate-600 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
-                >
-                  <ExternalLink size={16} aria-hidden="true" /> {externalMapLabel()}
-                </a>
-              )}
+
               <button type="button" onClick={clearRoute} className="w-full rounded-xl border border-slate-200 bg-white py-3 font-semibold text-red-500 transition-colors hover:bg-red-50 dark:border-slate-600 dark:bg-slate-800 dark:hover:bg-red-900/30">
                 Очистить весь маршрут
               </button>

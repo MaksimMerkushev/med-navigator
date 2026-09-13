@@ -117,43 +117,6 @@ html.dark .leaflet-control-attribution {
   }
 }
 
-/* ============ АНИМАЦИИ ФИЛЬТРОВ ============ */
-.filters-collapse {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transition: grid-template-rows 0.35s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
-  will-change: grid-template-rows, opacity;
-}
-
-.filters-collapse.is-collapsed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-}
-
-.filters-collapse__inner {
-  overflow: hidden;
-}
-
-/* Быстрые блоки */
-.quick-blocks-collapse {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transition: grid-template-rows 0.32s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease;
-  will-change: grid-template-rows, opacity;
-}
-
-.quick-blocks-collapse.is-collapsed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.quick-blocks-collapse__inner {
-  overflow: hidden;
-}
-
 /* ============ АНИМАЦИИ ТЕМЫ ============ */
 .theme-switching,
 .theme-switching * {
@@ -383,12 +346,6 @@ html.dark .leaflet-control-attribution {
   select,
   input[type="range"] {
     min-height: 44px;
-  }
-
-  /* Увеличенные кнопки фильтров */
-  .filters-collapse button,
-  .filters-collapse select {
-    font-size: 14px;
   }
 }
 
